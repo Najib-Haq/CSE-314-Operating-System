@@ -53,15 +53,9 @@ create_csv() {
     # CHANGE THIS. OUTPUT is different
     for folder in $output_dir/*; do
         type=${folder##*/}
-        IFS=$'\n' # helps create the array according to newlines from find
-        if [ $type = "others" ]; then
-            data=($(find $folder/ -type f -not -name "*.*"))
-        else
-            data=($(find $folder/ -type f -name "*.$type"))
-        fi
-        unset IFS
-        echo "$type ${#data[@]}"
-        echo "$type,${#data[@]}" >> output.csv
+        length=$(wc -l < $output_dir/$type/desc_$type.txt)
+        echo "$type $length"
+        echo "$type,$length" >> output.csv
     done
 
     echo "ignored,${#NOT_TAKEN[@]}" >> output.csv
@@ -91,26 +85,13 @@ while true; do
     fi
 done
 
-# read file content
-idx=1
-# need to check if anything was read into line too (for last line read)
-# while read line || [ -n "$line" ]; do
-while read -r fileTypes[$idx]; do
-    # echo "In Line : $((idx+1)) : $line"
-    # echo "${fileTypes[$idx]}"
-    idx=$((idx+1))
-    # fileTypes[$idx]=$line
-done < "$filename"
-# echo "${fileTypes[*]}" # doesnt work for me why 
-
+# read file 
 dont_match_types=$(tr -s '\r\n' '|' < $filename)
 echo "DONOT MATCH TYPES: $dont_match_types"
-
 
 # get files and folders inside current directory
 get_files "$directory" "$dont_match_types"
 echo "ALL FILES: ${ALL_FILES[*]}, ${#ALL_FILES[@]}"
-
 
 ## create output_dir
 rm -r $output_dir # for testing
