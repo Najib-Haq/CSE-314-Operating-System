@@ -14,11 +14,17 @@ get_files() {
         if [ -f "$file" ]; then
             # echo "file $file"
             # https://stackoverflow.com/questions/9587725/how-do-i-iterate-over-each-line-in-a-file-with-bash
-            take_file=$(find $file -regextype posix-egrep -not -regex ".*/*.($2)$")
-            donot_take_file=$(find $file -regextype posix-egrep -regex ".*/*.($2)$")
-            # echo "TAKE FILE : $take_file"
-            ALL_FILES+=($take_file)
-            NOT_TAKEN+=($donot_take_file)
+            # "file" to handle white space in names
+            take_file=$(find "$file" -regextype posix-egrep -not -regex ".*/*.($2)$")
+            donot_take_file=$(find "$file" -regextype posix-egrep -regex ".*/*.($2)$")
+            
+            # handle no result
+            if [ ${#take_file} != 0 ]; then
+                ALL_FILES+=("$take_file")
+            fi
+            if [ ${#donot_take_file} != 0 ]; then
+                NOT_TAKEN+=("$donot_take_file")
+            fi
         elif [ -d "$file" ]; then
             # echo "folder $file"
             get_files "$file" $2
@@ -29,8 +35,8 @@ get_files() {
 # 1st argument is directory name, 2nd argument is filename
 move_files() {
     # transfer file
-    mkdir -p $output_dir/$1
-    cp $2 $output_dir/$1
+    mkdir -p "$output_dir/$1"
+    cp "$2" "$output_dir/$1"
 
     # create description txt if doesnt exist
     path_file=$output_dir/$1/desc_$1.txt
@@ -87,7 +93,12 @@ done
 
 # read file 
 dont_match_types=$(tr -s '\r\n' '|' < $filename)
+# TODO: handle empty new line? - done?
+if [ ${dont_match_types: -1} = "|" ]; then
+    dont_match_types="${dont_match_types%|}"
+fi
 echo "DONOT MATCH TYPES: $dont_match_types"
+
 
 # get files and folders inside current directory
 get_files "$directory" "$dont_match_types"
@@ -97,15 +108,16 @@ echo "ALL FILES: ${ALL_FILES[*]}, ${#ALL_FILES[@]}"
 rm -r $output_dir # for testing
 mkdir $output_dir
 
-for file in "${ALL_FILES[@]}"; do
+for ((i = 0; i < ${#ALL_FILES[@]}; i++)); do
+    file=${ALL_FILES[$i]}
     IFS='.'
     read -a fileNameArray <<< "$file"
     unset IFS
     if [ "${#fileNameArray[@]}" == 1 ]; then
-        move_files others $file
+        move_files others "$file"
     else
         # transfer file
-        move_files ${fileNameArray[1]} $file
+        move_files ${fileNameArray[1]} "$file"
     fi
     echo "${fileNameArray[@]}"
 done
