@@ -66,7 +66,16 @@ create_csv() {
     # CHANGE THIS. OUTPUT is different
     for folder in $output_dir/*; do
         type=${folder##*/}
-        length=$(wc -l < $output_dir/$type/desc_$type.txt)
+
+        IFS=$'\n' # helps create the array according to newlines from find
+        if [ $type = "others" ]; then
+            files_in_dir=($(find $folder/ -type f -not -name "*.*"))
+        else
+            files_in_dir=($(find $folder/ -type f -name "*.$type"))
+        fi
+        unset IFS
+        length=${#files_in_dir[@]}
+        # length=$(wc -l < $output_dir/$type/desc_$type.txt)
         echo "$type $length"
         echo "$type,$length" >> output.csv
     done
