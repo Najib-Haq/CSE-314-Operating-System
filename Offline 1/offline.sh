@@ -1,8 +1,8 @@
 #!/bin/bash
 # 1st argument is input file name, 2nd argument is working directory
 # REMEMBER NO SPACE -_-
-filename=$1
-directory=$2
+filename="$1"
+directory="$2"
 output_dir="output_dir"
 
 ALL_FILES=()
@@ -10,14 +10,15 @@ NOT_TAKEN=()
 
 # 1st argument is directory, 2nd argument is file extensions to ignore
 get_files() {
+    # echo "here : $1"
     for file in "$1"/*; do
+        # echo "file : $file"
         if [ -f "$file" ]; then
             # echo "file $file"
             # https://stackoverflow.com/questions/9587725/how-do-i-iterate-over-each-line-in-a-file-with-bash
             # "file" to handle white space in names
             take_file=$(find "$file" -regextype posix-egrep -not -regex ".*/*.($2)$")
             donot_take_file=$(find "$file" -regextype posix-egrep -regex ".*/*.($2)$")
-            
             # handle no result
             if [ ${#take_file} != 0 ]; then
                 ALL_FILES+=("$take_file")
@@ -34,9 +35,15 @@ get_files() {
 
 # 1st argument is directory name, 2nd argument is filename
 move_files() {
+    file=$2
+    # HANDLE IF CURRENT DIR : ADD './'
+    if [ $directory = "." ]; then
+        file="./$file"
+    fi
     # transfer file
+    # -p : no error if existing, make parent directories as needed
     mkdir -p "$output_dir/$1"
-    cp "$2" "$output_dir/$1"
+    cp "$file" "$output_dir/$1"
 
     # create description txt if doesnt exist
     path_file=$output_dir/$1/desc_$1.txt
@@ -44,7 +51,7 @@ move_files() {
         touch $path_file
     fi
     # write to file
-    echo "$2" >> $path_file
+    echo "$file" >> $path_file
 }
 
 # create csv
@@ -67,17 +74,15 @@ create_csv() {
     echo "ignored,${#NOT_TAKEN[@]}" >> output.csv
 }
 
-
-# TODO: missing input handling
 # handle missing argument
 if [ $# -eq 0 ]; then
     echo "Input format : 1st argument is input file name, 2nd argument is working directory"
+    exit
+# handle directory name
+elif [ $# -eq 1 ]; then
+    directory="."
 fi
 
-# if [ $# -eq 2 ]; then
-#     echo "Changing current directory to $directory..."
-#     cd $directory
-# fi
 
 # handle file exist
 while true; do
@@ -92,13 +97,12 @@ while true; do
 done
 
 # read file 
-dont_match_types=$(tr -s '\r\n' '|' < $filename)
-# TODO: handle empty new line? - done?
+dont_match_types=$(tr -s '\r\n' '|' < "$filename")
+# handle empty new line? - done
 if [ ${dont_match_types: -1} = "|" ]; then
     dont_match_types="${dont_match_types%|}"
 fi
 echo "DONOT MATCH TYPES: $dont_match_types"
-
 
 # get files and folders inside current directory
 get_files "$directory" "$dont_match_types"
@@ -109,15 +113,20 @@ rm -r $output_dir # for testing
 mkdir $output_dir
 
 for ((i = 0; i < ${#ALL_FILES[@]}; i++)); do
-    file=${ALL_FILES[$i]}
-    IFS='.'
+    file=${ALL_FILES[$i]} #$(echo "${ALL_FILES[$i]}"| cut -d $"./" -f 1)
+    # HANDLE IF CURRENT DIR : CUT OFF './'
+    if [ $directory = "." ]; then
+        file="${file:2}"
+    fi
+    IFS="."
     read -a fileNameArray <<< "$file"
     unset IFS
+    # fileNameArray=($(echo "$file" | cut -d '.'))
     if [ "${#fileNameArray[@]}" == 1 ]; then
         move_files others "$file"
     else
         # transfer file
-        move_files ${fileNameArray[1]} "$file"
+        move_files "${fileNameArray[1]}" "$file"
     fi
     echo "${fileNameArray[@]}"
 done

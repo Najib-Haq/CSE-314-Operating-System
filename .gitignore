@@ -6,6 +6,7 @@
 /**/*.html
 /**/*.png
 /**/sample-io
+/**/sample-io_test
 /Offline 1/output_dir
 /Old batch material
 
