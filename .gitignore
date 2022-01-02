@@ -1,14 +1,20 @@
 /**/*.mp4
 /**/*.pdf
+/**/*.ppt
+/**/*.pptx
 /**/*.zip
 /**/*.txt
 /**/*.csv
 /**/*.html
 /**/*.png
+/**/*.out
 /**/sample-io
 /**/sample-io_test
 /Offline 1/output_dir
 /Offline 1/offline-testcase
 /Old batch material
+/Offline 2/Thread Example
+/Xv6
+/.vscode
 
 
