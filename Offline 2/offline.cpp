@@ -32,9 +32,10 @@ queue<int> kiosk_q;
 sem_t kiosks;
 sem_t special_kiosk;
 sem_t* belts;
-sem_t vip_channel;
-sem_t vip_lr_people;
-sem_t vip_rl_people;
+sem_t vip_LR_channel;
+sem_t vip_RL_channel;
+sem_t vip_LR_people;
+sem_t vip_RL_people;
 sem_t boarding;
 sem_t printing;
 // pthread_mutex_t printing;
@@ -98,54 +99,46 @@ void security_check(Passenger* p, int belt_no){
 
 void vip_left_right(Passenger* p){
     print("Passenger " + to_string(p->id) + " has started waiting for VIP channel (L->R) at time " + to_string(get_time()));    
-    sem_wait(&vip_lr_people); // access to variable vip_lr_people_count
+    sem_wait(&vip_LR_people); // access to variable vip_lr_people_count
     vip_lr_people_count += 1; 
-    if(vip_lr_people_count == 1) sem_wait(&vip_channel); // only 1st person waits for VIP channel to be free
-    sem_post(&vip_lr_people); // release access to variable
+    if(vip_lr_people_count == 1) {
+        sem_wait(&vip_RL_channel); // signal RL to be closed
+        sem_wait(&vip_LR_channel); // signal LR to be closed - in use
+    }
+    sem_post(&vip_LR_people); // release access to variable
     
     print("Passenger " + to_string(p->id) + " is moving in VIP channel (L->R) at time " + to_string(get_time())); 
     sleep(vip_time);
 
-    sem_wait(&vip_lr_people); // access to variable vip_channel_people
+    sem_wait(&vip_LR_people); // access to variable vip_lr_people_count
     vip_lr_people_count -= 1; 
-    if(vip_lr_people_count == 0) sem_post(&vip_channel); // signal VIP channel is free now
-    sem_post(&vip_lr_people); // release access to variable
+    if(vip_lr_people_count == 0) {
+        sem_post(&vip_LR_channel); // signal LR cross done
+        sem_post(&vip_RL_channel); // signal RL is free for use
+    }
+    sem_post(&vip_LR_people); // release access to variable
     print("Passenger " + to_string(p->id) + " has crossed VIP channel (L->R) at time " + to_string(get_time()));  
 }
 
 
 void vip_right_left(Passenger* p){
     print("Passenger " + to_string(p->id) + " has started waiting for VIP channel (R->L) at time " + to_string(get_time()));
-    sem_wait(&vip_rl_people); // access to variable vip_lr_people_count
-    vip_rl_people_count += 1; 
-    if(vip_rl_people_count == 1) sem_wait(&vip_channel); // only 1st person waits for VIP channel to be free
-    else{
-        // this block is inside vip_rl_people so next RL guy cannot enter
-        sem_wait(&vip_lr_people);
-        if(vip_lr_people_count>0) {
-            // sem_post(&vip_channel); // release VIP channel for left-right
-            sem_wait(&vip_channel); // take back control once VIP channel is free again
-        }
-        sem_post(&vip_lr_people);
-    }
-    sem_post(&vip_rl_people); // release access to variable
     
+    sem_wait(&vip_RL_channel); // this gives LR priority over RL : can be stopped by LR any time.
+    sem_wait(&vip_RL_people); // access to variable vip_rl_people_count
+    vip_rl_people_count += 1; 
+    if(vip_rl_people_count == 1) sem_wait(&vip_LR_channel); // LR cannot be accessed now, RL crossing will begin
+    sem_post(&vip_RL_people); // release access to variable
+    sem_post(&vip_RL_channel);
+
     print("Passenger " + to_string(p->id) + " is moving in VIP channel (R->L) at time " + to_string(get_time()));
     sleep(vip_time);
 
-    sem_wait(&vip_rl_people); // access to variable vip_channel_people
+    // this automatically handles the case to wake up LR when current RLs are done if LR present
+    sem_wait(&vip_RL_people); // access to variable vip_rl_people_count
     vip_rl_people_count -= 1; 
-    if(vip_rl_people_count == 0) sem_post(&vip_channel); // signal VIP channel is free now
-    else{
-        // this block is inside vip_rl_people so next RL guy cannot enter
-        sem_wait(&vip_lr_people);
-        if(vip_lr_people_count>0) {
-            // sem_post(&vip_channel); // release VIP channel for left-right
-            sem_post(&vip_channel); // take back control once VIP channel is free again
-        }
-        sem_post(&vip_lr_people);
-    }
-    sem_post(&vip_rl_people); // release access to variable
+    if(vip_rl_people_count == 0) sem_post(&vip_LR_channel); // RL crossing done. signal LR is free now.
+    sem_post(&vip_RL_people); // release access to variable
     print("Passenger " + to_string(p->id) + " has crossed VIP channel (R->L) at time " + to_string(get_time())); 
 }
 
@@ -198,6 +191,117 @@ void* airport(void *p){
 }
 
 
+//////////////// TEST CASES /////////////////////
+void* vip_LR(void *p){
+    Passenger* passenger = (Passenger *) p;
+    vip_left_right(passenger);
+}
+
+void* vip_RL(void *p){
+    Passenger* passenger = (Passenger *) p;
+    vip_right_left(passenger);
+}
+
+void test1(){
+    /* 
+        passengers 1-4:
+        2 LR at time 0 
+        2 RL at time 1
+        result : first 2 LR cross then 2 RL cross
+
+        passengers 5-8:
+        2 RL at time 4
+        2 LR at time 5
+        result : first 2 RL cross then 2 LR cross        
+    */
+    vip_time=2; 
+    pthread_t threads[8];
+    // test LR first
+    int id=0;
+    pthread_create(&threads[id], NULL, vip_LR, (void*) new Passenger(id+1));
+    id++;
+    pthread_create(&threads[id], NULL, vip_LR, (void*) new Passenger(id+1));
+    sleep(1);
+    id++;
+    pthread_create(&threads[id], NULL, vip_RL, (void*) new Passenger(id+1));
+    id++;
+    pthread_create(&threads[id], NULL, vip_RL, (void*) new Passenger(id+1));
+
+    sleep(3);
+    
+    // test RL first
+    id++;
+    pthread_create(&threads[id], NULL, vip_RL, (void*) new Passenger(id+1));
+    id++;
+    pthread_create(&threads[id], NULL, vip_RL, (void*) new Passenger(id+1));
+    sleep(1);
+    id++;
+    pthread_create(&threads[id], NULL, vip_LR, (void*) new Passenger(id+1));
+    id++;
+    pthread_create(&threads[id], NULL, vip_LR, (void*) new Passenger(id+1));
+}
+
+void test2(){
+    /* 
+        test LR priority:
+        1 RL at time 0
+        1 RL at time 1
+        2 LR at time 2
+        2 RL at time 3
+        result : first 1,2 RL; 3,4 LR, 5,6 RL
+    */
+
+    vip_time=3; 
+    pthread_t threads[6];
+    // test LR first
+    int id=0;
+    pthread_create(&threads[id], NULL, vip_RL, (void*) new Passenger(id+1));
+    id++;
+    sleep(2);
+    pthread_create(&threads[id], NULL, vip_RL, (void*) new Passenger(id+1));
+    sleep(1);
+    id++;
+    pthread_create(&threads[id], NULL, vip_LR, (void*) new Passenger(id+1));
+    id++;
+    pthread_create(&threads[id], NULL, vip_LR, (void*) new Passenger(id+1));
+    sleep(1);
+    id++;
+    pthread_create(&threads[id], NULL, vip_RL, (void*) new Passenger(id+1));
+    id++;
+    pthread_create(&threads[id], NULL, vip_RL, (void*) new Passenger(id+1));
+}
+
+void test3(){
+    /* 
+        test RL priority:
+        1 LR at time 0
+        1 LR at time 1
+        2 RL at time 2
+        2 LR at time 3
+        result : first 1,2,5,6 LR, 3,4 RL
+    */
+
+    vip_time=3; 
+    pthread_t threads[6];
+    // test LR first
+    int id=0;
+    pthread_create(&threads[id], NULL, vip_LR, (void*) new Passenger(id+1));
+    id++;
+    sleep(2);
+    pthread_create(&threads[id], NULL, vip_LR, (void*) new Passenger(id+1));
+    sleep(1);
+    id++;
+    pthread_create(&threads[id], NULL, vip_RL, (void*) new Passenger(id+1));
+    id++;
+    pthread_create(&threads[id], NULL, vip_RL, (void*) new Passenger(id+1));
+    sleep(1);
+    id++;
+    pthread_create(&threads[id], NULL, vip_LR, (void*) new Passenger(id+1));
+    id++;
+    pthread_create(&threads[id], NULL, vip_LR, (void*) new Passenger(id+1));
+}
+
+
 int main(){
     freopen("input.txt", "r", stdin);
     // freopen("1705044_log.txt", "w", stdout);
@@ -206,8 +310,8 @@ int main(){
     cin>>no_kiosk>>no_belts>>no_belt_passengers;
     cin>>kisok_time>>security_time>>boarding_time>>vip_time;
 
-    cout<<no_kiosk<<" "<<no_belts<<" "<<no_belt_passengers<<endl;
-    cout<<kisok_time<<" "<<security_time<<" "<<boarding_time<<" "<<vip_time<<endl;
+    // cout<<no_kiosk<<" "<<no_belts<<" "<<no_belt_passengers<<endl;
+    // cout<<kisok_time<<" "<<security_time<<" "<<boarding_time<<" "<<vip_time<<endl;
 
     int i, j, number, id=1;
     start = chrono::steady_clock::now();
@@ -219,22 +323,24 @@ int main(){
     sem_init(&kiosks, 0, no_kiosk);
     sem_init(&special_kiosk, 0, 1);
     for(i=0; i<no_belts; i++) sem_init(&belts[i], 0, no_belt_passengers);
-    sem_init(&vip_channel, 0, 1);
-    sem_init(&vip_lr_people, 0, 1);
-    sem_init(&vip_rl_people, 0, 1);
+    sem_init(&vip_LR_channel, 0, 1);
+    sem_init(&vip_RL_channel, 0, 1);
+    sem_init(&vip_LR_people, 0, 1);
+    sem_init(&vip_RL_people, 0, 1);
     sem_init(&boarding, 0, 1);
     sem_init(&printing, 0, 1);
 
+    test3();
 
-    for(i=0; i<2; i++){
-        number = distribution(generator);
-        for(j=0; j<number; j++){
-            pthread_t thread;
-            pthread_create(&thread, NULL, airport, (void*) new Passenger(id));
-            id += 1;
-        }
-        sleep(2);
-    }
+    // for(i=0; i<2; i++){
+    //     number = distribution(generator);
+    //     for(j=0; j<number; j++){
+    //         pthread_t thread;
+    //         pthread_create(&thread, NULL, airport, (void*) new Passenger(id));
+    //         id += 1;
+    //     }
+    //     sleep(2);
+    // }
 
     pthread_exit(NULL);
 }
