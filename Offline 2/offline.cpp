@@ -10,7 +10,8 @@
 
 using namespace std;
 default_random_engine generator;
-poisson_distribution<int> distribution(5);
+// poisson_distribution<int> distribution(5);
+exponential_distribution<double> distribution (1/35.0); // 1/lambda
 
 string message;
 
@@ -149,8 +150,8 @@ void board(Passenger *p){
     print("Passenger " + to_string(p->id) + " has started boarding the plane at time " + to_string(get_time()));
     sleep(boarding_time);
     p->pass = true; // got pass
-    // make passenger lose pass 20% of the time
-    if(((double) rand() / (RAND_MAX)) < 0.9){ 
+    // make passenger lose pass 30% of the time
+    if(((double) rand() / (RAND_MAX)) < 0.3){ 
         p->pass = false;
         p->vip = true; // passenger now has vip channel access 
         print("Passenger " + to_string(p->id) + " has lost his boarding pass at time " + to_string(get_time())); 
@@ -159,11 +160,12 @@ void board(Passenger *p){
     sem_post(&boarding);
 }
 
+
 void* airport(void *p){
     Passenger* passenger = (Passenger *) p;
 
-    // make passenger vip 20% of the time
-    if(((double) rand() / (RAND_MAX)) < 0.9) { passenger->vip = true; }
+    // make passenger vip 30% of the time
+    if(((double) rand() / (RAND_MAX)) < 0.3) { passenger->vip = true; }
 
     if(passenger->vip) print("Passenger " + to_string(passenger->id) + " (VIP) has arrived at the airport at time " + to_string(get_time()));
     else print("Passenger " + to_string(passenger->id) + " has arrived at the airport at time " + to_string(get_time()));
@@ -313,7 +315,7 @@ int main(){
     // cout<<no_kiosk<<" "<<no_belts<<" "<<no_belt_passengers<<endl;
     // cout<<kisok_time<<" "<<security_time<<" "<<boarding_time<<" "<<vip_time<<endl;
 
-    int i, j, number, id=1;
+    int i, j, sleep_time, id=1;
     start = chrono::steady_clock::now();
     belts = new sem_t[no_belts];
     // push available kisoks into queue
@@ -330,8 +332,9 @@ int main(){
     sem_init(&boarding, 0, 1);
     sem_init(&printing, 0, 1);
 
-    test3();
+    // test3();
 
+    // poisson distribution
     // for(i=0; i<2; i++){
     //     number = distribution(generator);
     //     for(j=0; j<number; j++){
@@ -341,6 +344,15 @@ int main(){
     //     }
     //     sleep(2);
     // }
+
+    // poisson process
+    for(i=0; i<30; i++){
+        // cout<<distribution(generator)<<endl;
+        pthread_t thread;
+        pthread_create(&thread, NULL, airport, (void*) new Passenger(id));
+        id += 1;
+        sleep(distribution(generator));
+    }
 
     pthread_exit(NULL);
 }
