@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index 09d790c..fa0f48b 100644
+index 09d790c..96cb452 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -52,6 +52,7 @@ endif
@@ -10,15 +10,16 @@ index 09d790c..fa0f48b 100644
  
  # Try to infer the correct QEMU
  ifndef QEMU
-@@ -181,6 +182,7 @@ UPROGS=\
+@@ -181,6 +182,8 @@ UPROGS=\
  	_usertests\
  	_wc\
  	_zombie\
 +	_testtickets\
++	_testpinfo\
  
  fs.img: mkfs README $(UPROGS)
  	./mkfs fs.img README $(UPROGS)
-@@ -217,7 +219,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
+@@ -217,7 +220,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
  	then echo "-gdb tcp::$(GDBPORT)"; \
  	else echo "-s -p $(GDBPORT)"; fi)
  ifndef CPUS
@@ -27,19 +28,47 @@ index 09d790c..fa0f48b 100644
  endif
  QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
  
-@@ -251,6 +253,7 @@ EXTRA=\
+@@ -251,6 +254,7 @@ EXTRA=\
  	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
  	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
  	printf.c umalloc.c\
-+	testtickets.c\
++	testtickets.c testpinfo.c\
  	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
  	.gdbinit.tmpl gdbutil\
  
+diff --git a/defs.h b/defs.h
+index 82fb982..32e5aea 100644
+--- a/defs.h
++++ b/defs.h
+@@ -9,6 +9,7 @@ struct spinlock;
+ struct sleeplock;
+ struct stat;
+ struct superblock;
++struct pstat;
+ 
+ // bio.c
+ void            binit(void);
+@@ -120,6 +121,7 @@ void            userinit(void);
+ int             wait(void);
+ void            wakeup(void*);
+ void            yield(void);
++int             fillpinfo(struct pstat*); // CUSTOM            
+ 
+ // swtch.S
+ void            swtch(struct context**, struct context*);
 diff --git a/proc.c b/proc.c
-index 806b1b1..59dccff 100644
+index 806b1b1..d81252f 100644
 --- a/proc.c
 +++ b/proc.c
-@@ -88,6 +88,7 @@ allocproc(void)
+@@ -6,6 +6,7 @@
+ #include "x86.h"
+ #include "proc.h"
+ #include "spinlock.h"
++#include "pstat.h"
+ 
+ struct {
+   struct spinlock lock;
+@@ -88,6 +89,7 @@ allocproc(void)
  found:
    p->state = EMBRYO;
    p->pid = nextpid++;
@@ -47,7 +76,7 @@ index 806b1b1..59dccff 100644
  
    release(&ptable.lock);
  
-@@ -199,6 +200,7 @@ fork(void)
+@@ -199,6 +201,7 @@ fork(void)
    np->sz = curproc->sz;
    np->parent = curproc;
    *np->tf = *curproc->tf;
@@ -55,6 +84,33 @@ index 806b1b1..59dccff 100644
  
    // Clear %eax so that fork returns 0 in the child.
    np->tf->eax = 0;
+@@ -532,3 +535,25 @@ procdump(void)
+     cprintf("\n");
+   }
+ }
++
++
++// custom
++int 
++fillpinfo(struct pstat* pt)
++{
++  acquire(&ptable.lock);
++  int no_p = 0;
++  struct proc *p;
++
++  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++    pt->inuse[no_p] = 1;
++    if(p->state == UNUSED) pt->inuse[no_p] = 0;
++    pt->pid[no_p] = p->pid;
++    pt->ticks[no_p] = 0; // TODO : add ticks??
++    pt->tickets[no_p] = p->tickets;
++    no_p += 1;
++  }
++  
++  release(&ptable.lock);
++  return 0;
++}
+\ No newline at end of file
 diff --git a/proc.h b/proc.h
 index 1647114..235a849 100644
 --- a/proc.h
@@ -70,34 +126,36 @@ index 1647114..235a849 100644
  
  // Process memory is laid out contiguously, low addresses first:
 diff --git a/syscall.c b/syscall.c
-index ee85261..d367861 100644
+index ee85261..a49e2d4 100644
 --- a/syscall.c
 +++ b/syscall.c
-@@ -103,6 +103,9 @@ extern int sys_unlink(void);
+@@ -103,6 +103,10 @@ extern int sys_unlink(void);
  extern int sys_wait(void);
  extern int sys_write(void);
  extern int sys_uptime(void);
 +// CUSTOM
 +extern int sys_settickets(void);
 +extern int sys_gettickets(void);
++extern int sys_getpinfo(void);
  
  static int (*syscalls[])(void) = {
  [SYS_fork]    sys_fork,
-@@ -126,6 +129,9 @@ static int (*syscalls[])(void) = {
+@@ -126,6 +130,10 @@ static int (*syscalls[])(void) = {
  [SYS_link]    sys_link,
  [SYS_mkdir]   sys_mkdir,
  [SYS_close]   sys_close,
 +// CUSTOM
 +[SYS_settickets] sys_settickets,
 +[SYS_gettickets] sys_gettickets,
++[SYS_getpinfo]   sys_getpinfo,
  };
  
  void
 diff --git a/syscall.h b/syscall.h
-index bc5f356..f160ede 100644
+index bc5f356..e63e911 100644
 --- a/syscall.h
 +++ b/syscall.h
-@@ -20,3 +20,7 @@
+@@ -20,3 +20,8 @@
  #define SYS_link   19
  #define SYS_mkdir  20
  #define SYS_close  21
@@ -105,12 +163,21 @@ index bc5f356..f160ede 100644
 +// CUSTOM
 +#define SYS_settickets 22
 +#define SYS_gettickets 23
++#define SYS_getpinfo   24 
 \ No newline at end of file
 diff --git a/sysproc.c b/sysproc.c
-index 0686d29..b595890 100644
+index 0686d29..10b7ac2 100644
 --- a/sysproc.c
 +++ b/sysproc.c
-@@ -89,3 +89,28 @@ sys_uptime(void)
+@@ -6,6 +6,7 @@
+ #include "memlayout.h"
+ #include "mmu.h"
+ #include "proc.h"
++#include "pstat.h"
+ 
+ int
+ sys_fork(void)
+@@ -89,3 +90,37 @@ sys_uptime(void)
    release(&tickslock);
    return xticks;
  }
@@ -139,30 +206,48 @@ index 0686d29..b595890 100644
 +{
 +  return myproc()->tickets;
 +}
++
++
++int
++sys_getpinfo(void)
++{
++  struct pstat *pt;
++  if(argptr (0 , (void*)&pt ,sizeof(*pt)) < 0) return -1; 
++  return fillpinfo(pt);
++}
 \ No newline at end of file
 diff --git a/user.h b/user.h
-index 4f99c52..4a8c3bc 100644
+index 4f99c52..7540576 100644
 --- a/user.h
 +++ b/user.h
-@@ -24,6 +24,10 @@ char* sbrk(int);
+@@ -1,5 +1,6 @@
+ struct stat;
+ struct rtcdate;
++struct pstat;
+ 
+ // system calls
+ int fork(void);
+@@ -24,6 +25,11 @@ char* sbrk(int);
  int sleep(int);
  int uptime(void);
  
 +// custom
 +int settickets(int);
 +int gettickets();
++int getpinfo(struct pstat*);
 +
  // ulib.c
  int stat(const char*, struct stat*);
  char* strcpy(char*, const char*);
 diff --git a/usys.S b/usys.S
-index 8bfd8a1..8693d94 100644
+index 8bfd8a1..6a5707f 100644
 --- a/usys.S
 +++ b/usys.S
-@@ -29,3 +29,5 @@ SYSCALL(getpid)
+@@ -29,3 +29,6 @@ SYSCALL(getpid)
  SYSCALL(sbrk)
  SYSCALL(sleep)
  SYSCALL(uptime)
 +SYSCALL(settickets)
 +SYSCALL(gettickets)
++SYSCALL(getpinfo)
 \ No newline at end of file
