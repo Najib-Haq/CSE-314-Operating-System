@@ -37,7 +37,7 @@ index 09d790c..96cb452 100644
  	.gdbinit.tmpl gdbutil\
  
 diff --git a/defs.h b/defs.h
-index 82fb982..32e5aea 100644
+index 82fb982..6189b15 100644
 --- a/defs.h
 +++ b/defs.h
 @@ -9,6 +9,7 @@ struct spinlock;
@@ -48,16 +48,18 @@ index 82fb982..32e5aea 100644
  
  // bio.c
  void            binit(void);
-@@ -120,6 +121,7 @@ void            userinit(void);
+@@ -120,6 +121,9 @@ void            userinit(void);
  int             wait(void);
  void            wakeup(void*);
  void            yield(void);
-+int             fillpinfo(struct pstat*); // CUSTOM            
++// CUSTOM
++void            setproctickets(int);
++int             fillpinfo(struct pstat*);            
  
  // swtch.S
  void            swtch(struct context**, struct context*);
 diff --git a/proc.c b/proc.c
-index 806b1b1..d81252f 100644
+index 806b1b1..d0efa68 100644
 --- a/proc.c
 +++ b/proc.c
 @@ -6,6 +6,7 @@
@@ -76,21 +78,132 @@ index 806b1b1..d81252f 100644
  
    release(&ptable.lock);
  
-@@ -199,6 +201,7 @@ fork(void)
-   np->sz = curproc->sz;
-   np->parent = curproc;
-   *np->tf = *curproc->tf;
+@@ -215,6 +217,7 @@ fork(void)
+   acquire(&ptable.lock);
+ 
+   np->state = RUNNABLE;
 +  np->tickets = curproc->tickets; // set tickets number
  
-   // Clear %eax so that fork returns 0 in the child.
-   np->tf->eax = 0;
-@@ -532,3 +535,25 @@ procdump(void)
+   release(&ptable.lock);
+ 
+@@ -320,7 +323,7 @@ wait(void)
+ //  - eventually that process transfers control
+ //      via swtch back to the scheduler.
+ void
+-scheduler(void)
++modified_scheduler(void)
+ {
+   struct proc *p;
+   struct cpu *c = mycpu();
+@@ -335,7 +338,8 @@ scheduler(void)
+     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+       if(p->state != RUNNABLE)
+         continue;
+-
++      // cprintf("Current process ticket %d, state %d, id %d\n", p->tickets, p->state, p->pid);
++      
+       // Switch to chosen process.  It is the process's job
+       // to release ptable.lock and then reacquire it
+       // before jumping back to us.
+@@ -349,12 +353,82 @@ scheduler(void)
+       // Process is done running for now.
+       // It should have changed its p->state before coming back.
+       c->proc = 0;
++      // cprintf("Process returned and state %d and id %d\n", p->state, p->pid);
++
+     }
+     release(&ptable.lock);
++  }
++}
++
++int rand_x = 1320;
++int
++getrandom(int mod)
++{
++  //https://en.wikipedia.org/wiki/Linear_congruential_generator
++  rand_x = ((23*rand_x + 120) % mod);
++  return rand_x+1;
++}
++
++void
++scheduler(void)
++{
++  struct proc *p;
++  struct cpu *c = mycpu();
++  c->proc = 0;
++  
++  int total_tickets, current_tickets, winner_ticket;
++
++  for(;;){
++    // Enable interrupts on this processor.
++    sti();
++
++    // get total number of tickets
++    acquire(&ptable.lock);
++    // TODO : if this is intialized as 0 then there is a lock problem
++    total_tickets=1; current_tickets=0;
++    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++      // TODO : need runnable? 
++      // TODO : need lock?
++      // cprintf("STATE is : %d\n", p->state);
++      if(p->state == RUNNABLE) total_tickets += p->tickets; 
++    }
+ 
++    // get winner ticket
++    winner_ticket = getrandom(total_tickets);
++    // cprintf("Winner ticket : %d\n", winner_ticket);
++
++    // Loop over process table looking for process to run.
++    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++      if(p->state != RUNNABLE) continue;
++
++      current_tickets += p->tickets;
++      // cprintf("Current tickets : %d and current process ticket %d, state %d id %d\n", current_tickets, p->tickets, p->state, p->pid);
++      if(current_tickets >= winner_ticket){
++        // Switch to chosen process.  It is the process's job
++        // to release ptable.lock and then reacquire it
++        // before jumping back to us.
++        c->proc = p;
++        switchuvm(p);
++        p->state = RUNNING;
++
++        swtch(&(c->scheduler), p->context);
++        switchkvm();
++
++        // Process is done running for now.
++        // It should have changed its p->state before coming back.
++        c->proc = 0;
++        // cprintf("Process returned and state %d id %d\n", p->state, p->pid);
++
++        // now break to get new processor
++        break;
++      }
++      
++    }
++    release(&ptable.lock);
+   }
+ }
+ 
++
+ // Enter scheduler.  Must hold only ptable.lock
+ // and have changed proc->state. Saves and restores
+ // intena because intena is a property of this
+@@ -532,3 +606,34 @@ procdump(void)
      cprintf("\n");
    }
  }
 +
 +
 +// custom
++void
++setproctickets(int number)
++{
++  acquire(&ptable.lock);
++  myproc()->tickets = number;
++  release(&ptable.lock);
++}
++
++
 +int 
 +fillpinfo(struct pstat* pt)
 +{
@@ -126,10 +239,10 @@ index 1647114..235a849 100644
  
  // Process memory is laid out contiguously, low addresses first:
 diff --git a/syscall.c b/syscall.c
-index ee85261..a49e2d4 100644
+index ee85261..6342c33 100644
 --- a/syscall.c
 +++ b/syscall.c
-@@ -103,6 +103,10 @@ extern int sys_unlink(void);
+@@ -103,6 +103,11 @@ extern int sys_unlink(void);
  extern int sys_wait(void);
  extern int sys_write(void);
  extern int sys_uptime(void);
@@ -137,10 +250,11 @@ index ee85261..a49e2d4 100644
 +extern int sys_settickets(void);
 +extern int sys_gettickets(void);
 +extern int sys_getpinfo(void);
++extern int sys_getrand(void);
  
  static int (*syscalls[])(void) = {
  [SYS_fork]    sys_fork,
-@@ -126,6 +130,10 @@ static int (*syscalls[])(void) = {
+@@ -126,6 +131,11 @@ static int (*syscalls[])(void) = {
  [SYS_link]    sys_link,
  [SYS_mkdir]   sys_mkdir,
  [SYS_close]   sys_close,
@@ -148,14 +262,15 @@ index ee85261..a49e2d4 100644
 +[SYS_settickets] sys_settickets,
 +[SYS_gettickets] sys_gettickets,
 +[SYS_getpinfo]   sys_getpinfo,
++[SYS_getrand]    sys_getrand,
  };
  
  void
 diff --git a/syscall.h b/syscall.h
-index bc5f356..e63e911 100644
+index bc5f356..7e98e40 100644
 --- a/syscall.h
 +++ b/syscall.h
-@@ -20,3 +20,8 @@
+@@ -20,3 +20,9 @@
  #define SYS_link   19
  #define SYS_mkdir  20
  #define SYS_close  21
@@ -164,9 +279,10 @@ index bc5f356..e63e911 100644
 +#define SYS_settickets 22
 +#define SYS_gettickets 23
 +#define SYS_getpinfo   24 
++#define SYS_getrand    25
 \ No newline at end of file
 diff --git a/sysproc.c b/sysproc.c
-index 0686d29..10b7ac2 100644
+index 0686d29..56a1de1 100644
 --- a/sysproc.c
 +++ b/sysproc.c
 @@ -6,6 +6,7 @@
@@ -177,7 +293,7 @@ index 0686d29..10b7ac2 100644
  
  int
  sys_fork(void)
-@@ -89,3 +90,37 @@ sys_uptime(void)
+@@ -89,3 +90,47 @@ sys_uptime(void)
    release(&tickslock);
    return xticks;
  }
@@ -193,11 +309,8 @@ index 0686d29..10b7ac2 100644
 +    return -1;
 +
 +  //cprintf("n is %d\n", n);
-+  // TODO : do i need to add this in a acquire release?
-+  myproc()->tickets = n;
-+
++  setproctickets(n);
 +  return 0; // successful
-+
 +}
 +
 +
@@ -215,9 +328,22 @@ index 0686d29..10b7ac2 100644
 +  if(argptr (0 , (void*)&pt ,sizeof(*pt)) < 0) return -1; 
 +  return fillpinfo(pt);
 +}
++
++
++int rand_y = 1320;
++int
++sys_getrand(void)
++{
++  //https://en.wikipedia.org/wiki/Linear_congruential_generator
++  int mod;
++  argint(0, &mod);
++
++  rand_y = ((23*rand_y + 120) % mod);
++  return rand_y+1;
++}
 \ No newline at end of file
 diff --git a/user.h b/user.h
-index 4f99c52..7540576 100644
+index 4f99c52..408efe5 100644
 --- a/user.h
 +++ b/user.h
 @@ -1,5 +1,6 @@
@@ -227,7 +353,7 @@ index 4f99c52..7540576 100644
  
  // system calls
  int fork(void);
-@@ -24,6 +25,11 @@ char* sbrk(int);
+@@ -24,6 +25,12 @@ char* sbrk(int);
  int sleep(int);
  int uptime(void);
  
@@ -235,19 +361,21 @@ index 4f99c52..7540576 100644
 +int settickets(int);
 +int gettickets();
 +int getpinfo(struct pstat*);
++int getrand(int modulus);
 +
  // ulib.c
  int stat(const char*, struct stat*);
  char* strcpy(char*, const char*);
 diff --git a/usys.S b/usys.S
-index 8bfd8a1..6a5707f 100644
+index 8bfd8a1..5fbb112 100644
 --- a/usys.S
 +++ b/usys.S
-@@ -29,3 +29,6 @@ SYSCALL(getpid)
+@@ -29,3 +29,7 @@ SYSCALL(getpid)
  SYSCALL(sbrk)
  SYSCALL(sleep)
  SYSCALL(uptime)
 +SYSCALL(settickets)
 +SYSCALL(gettickets)
 +SYSCALL(getpinfo)
++SYSCALL(getrand)
 \ No newline at end of file
