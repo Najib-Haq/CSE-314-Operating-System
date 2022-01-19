@@ -59,7 +59,7 @@ index 82fb982..6189b15 100644
  // swtch.S
  void            swtch(struct context**, struct context*);
 diff --git a/proc.c b/proc.c
-index 806b1b1..d0efa68 100644
+index 806b1b1..2ac192c 100644
 --- a/proc.c
 +++ b/proc.c
 @@ -6,6 +6,7 @@
@@ -105,7 +105,7 @@ index 806b1b1..d0efa68 100644
        // Switch to chosen process.  It is the process's job
        // to release ptable.lock and then reacquire it
        // before jumping back to us.
-@@ -349,12 +353,82 @@ scheduler(void)
+@@ -349,12 +353,86 @@ scheduler(void)
        // Process is done running for now.
        // It should have changed its p->state before coming back.
        c->proc = 0;
@@ -141,18 +141,22 @@ index 806b1b1..d0efa68 100644
 +    // get total number of tickets
 +    acquire(&ptable.lock);
 +    // TODO : if this is intialized as 0 then there is a lock problem
-+    total_tickets=1; current_tickets=0;
++    total_tickets=0; current_tickets=0;
 +    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
 +      // TODO : need runnable? 
 +      // TODO : need lock?
 +      // cprintf("STATE is : %d\n", p->state);
 +      if(p->state == RUNNABLE) total_tickets += p->tickets; 
 +    }
- 
++    if (total_tickets == 0) {
++      release(&ptable.lock);
++      continue;
++    } 
++
 +    // get winner ticket
 +    winner_ticket = getrandom(total_tickets);
 +    // cprintf("Winner ticket : %d\n", winner_ticket);
-+
+ 
 +    // Loop over process table looking for process to run.
 +    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
 +      if(p->state != RUNNABLE) continue;
@@ -188,7 +192,7 @@ index 806b1b1..d0efa68 100644
  // Enter scheduler.  Must hold only ptable.lock
  // and have changed proc->state. Saves and restores
  // intena because intena is a property of this
-@@ -532,3 +606,34 @@ procdump(void)
+@@ -532,3 +610,34 @@ procdump(void)
      cprintf("\n");
    }
  }
