@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index 09d790c..96cb452 100644
+index 09d790c..d92b314 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -52,6 +52,7 @@ endif
@@ -10,16 +10,18 @@ index 09d790c..96cb452 100644
  
  # Try to infer the correct QEMU
  ifndef QEMU
-@@ -181,6 +182,8 @@ UPROGS=\
+@@ -181,6 +182,10 @@ UPROGS=\
  	_usertests\
  	_wc\
  	_zombie\
 +	_testtickets\
 +	_testpinfo\
++	_timewithtickets\
++	_lotterytest\
  
  fs.img: mkfs README $(UPROGS)
  	./mkfs fs.img README $(UPROGS)
-@@ -217,7 +220,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
+@@ -217,7 +222,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
  	then echo "-gdb tcp::$(GDBPORT)"; \
  	else echo "-s -p $(GDBPORT)"; fi)
  ifndef CPUS
@@ -28,11 +30,11 @@ index 09d790c..96cb452 100644
  endif
  QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
  
-@@ -251,6 +254,7 @@ EXTRA=\
+@@ -251,6 +256,7 @@ EXTRA=\
  	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
  	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
  	printf.c umalloc.c\
-+	testtickets.c testpinfo.c\
++	testtickets.c testpinfo.c timewithtickets.c lotterytest.c\
  	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
  	.gdbinit.tmpl gdbutil\
  
@@ -59,7 +61,7 @@ index 82fb982..6189b15 100644
  // swtch.S
  void            swtch(struct context**, struct context*);
 diff --git a/proc.c b/proc.c
-index 806b1b1..58ebddc 100644
+index 806b1b1..4e2bcfb 100644
 --- a/proc.c
 +++ b/proc.c
 @@ -6,6 +6,7 @@
@@ -195,7 +197,7 @@ index 806b1b1..58ebddc 100644
  // Enter scheduler.  Must hold only ptable.lock
  // and have changed proc->state. Saves and restores
  // intena because intena is a property of this
-@@ -532,3 +613,34 @@ procdump(void)
+@@ -532,3 +613,35 @@ procdump(void)
      cprintf("\n");
    }
  }
@@ -220,13 +222,14 @@ index 806b1b1..58ebddc 100644
 +
 +  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
 +    pt->inuse[no_p] = 1;
-+    if(p->state == UNUSED) pt->inuse[no_p] = 0;
++    if(p->state == UNUSED) continue; //pt->inuse[no_p] = 0;
 +    pt->pid[no_p] = p->pid;
 +    pt->ticks[no_p] = p->ticks; 
 +    pt->tickets[no_p] = p->tickets;
 +    no_p += 1;
 +  }
 +  
++  pt->num_processes = no_p; // TODO : delete this
 +  release(&ptable.lock);
 +  return 0;
 +}
@@ -247,10 +250,10 @@ index 1647114..ace27d0 100644
  
  // Process memory is laid out contiguously, low addresses first:
 diff --git a/syscall.c b/syscall.c
-index ee85261..6342c33 100644
+index ee85261..9fd1b92 100644
 --- a/syscall.c
 +++ b/syscall.c
-@@ -103,6 +103,11 @@ extern int sys_unlink(void);
+@@ -103,6 +103,12 @@ extern int sys_unlink(void);
  extern int sys_wait(void);
  extern int sys_write(void);
  extern int sys_uptime(void);
@@ -259,10 +262,11 @@ index ee85261..6342c33 100644
 +extern int sys_gettickets(void);
 +extern int sys_getpinfo(void);
 +extern int sys_getrand(void);
++extern int sys_yield(void);
  
  static int (*syscalls[])(void) = {
  [SYS_fork]    sys_fork,
-@@ -126,6 +131,11 @@ static int (*syscalls[])(void) = {
+@@ -126,6 +132,12 @@ static int (*syscalls[])(void) = {
  [SYS_link]    sys_link,
  [SYS_mkdir]   sys_mkdir,
  [SYS_close]   sys_close,
@@ -271,14 +275,15 @@ index ee85261..6342c33 100644
 +[SYS_gettickets] sys_gettickets,
 +[SYS_getpinfo]   sys_getpinfo,
 +[SYS_getrand]    sys_getrand,
++[SYS_yield]      sys_yield,
  };
  
  void
 diff --git a/syscall.h b/syscall.h
-index bc5f356..7e98e40 100644
+index bc5f356..0cb56e0 100644
 --- a/syscall.h
 +++ b/syscall.h
-@@ -20,3 +20,9 @@
+@@ -20,3 +20,10 @@
  #define SYS_link   19
  #define SYS_mkdir  20
  #define SYS_close  21
@@ -288,9 +293,10 @@ index bc5f356..7e98e40 100644
 +#define SYS_gettickets 23
 +#define SYS_getpinfo   24 
 +#define SYS_getrand    25
++#define SYS_yield      26
 \ No newline at end of file
 diff --git a/sysproc.c b/sysproc.c
-index 0686d29..56a1de1 100644
+index 0686d29..b2f6499 100644
 --- a/sysproc.c
 +++ b/sysproc.c
 @@ -6,6 +6,7 @@
@@ -301,7 +307,7 @@ index 0686d29..56a1de1 100644
  
  int
  sys_fork(void)
-@@ -89,3 +90,47 @@ sys_uptime(void)
+@@ -89,3 +90,53 @@ sys_uptime(void)
    release(&tickslock);
    return xticks;
  }
@@ -349,9 +355,15 @@ index 0686d29..56a1de1 100644
 +  rand_y = ((23*rand_y + 120) % mod);
 +  return rand_y+1;
 +}
++
++void
++sys_yield(void)
++{
++  yield();
++}
 \ No newline at end of file
 diff --git a/user.h b/user.h
-index 4f99c52..408efe5 100644
+index 4f99c52..8d99b77 100644
 --- a/user.h
 +++ b/user.h
 @@ -1,5 +1,6 @@
@@ -361,7 +373,7 @@ index 4f99c52..408efe5 100644
  
  // system calls
  int fork(void);
-@@ -24,6 +25,12 @@ char* sbrk(int);
+@@ -24,6 +25,13 @@ char* sbrk(int);
  int sleep(int);
  int uptime(void);
  
@@ -370,15 +382,16 @@ index 4f99c52..408efe5 100644
 +int gettickets();
 +int getpinfo(struct pstat*);
 +int getrand(int modulus);
++void yield(void);
 +
  // ulib.c
  int stat(const char*, struct stat*);
  char* strcpy(char*, const char*);
 diff --git a/usys.S b/usys.S
-index 8bfd8a1..5fbb112 100644
+index 8bfd8a1..73dde53 100644
 --- a/usys.S
 +++ b/usys.S
-@@ -29,3 +29,7 @@ SYSCALL(getpid)
+@@ -29,3 +29,8 @@ SYSCALL(getpid)
  SYSCALL(sbrk)
  SYSCALL(sleep)
  SYSCALL(uptime)
@@ -386,4 +399,5 @@ index 8bfd8a1..5fbb112 100644
 +SYSCALL(gettickets)
 +SYSCALL(getpinfo)
 +SYSCALL(getrand)
++SYSCALL(yield)
 \ No newline at end of file
