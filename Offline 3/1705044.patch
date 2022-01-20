@@ -61,18 +61,19 @@ index 82fb982..6189b15 100644
  // swtch.S
  void            swtch(struct context**, struct context*);
 diff --git a/proc.c b/proc.c
-index 806b1b1..4e2bcfb 100644
+index 806b1b1..091e776 100644
 --- a/proc.c
 +++ b/proc.c
-@@ -6,6 +6,7 @@
+@@ -6,6 +6,8 @@
  #include "x86.h"
  #include "proc.h"
  #include "spinlock.h"
 +#include "pstat.h"
++#include "random.c"
  
  struct {
    struct spinlock lock;
-@@ -88,6 +89,8 @@ allocproc(void)
+@@ -88,6 +90,8 @@ allocproc(void)
  found:
    p->state = EMBRYO;
    p->pid = nextpid++;
@@ -81,7 +82,7 @@ index 806b1b1..4e2bcfb 100644
  
    release(&ptable.lock);
  
-@@ -215,6 +218,8 @@ fork(void)
+@@ -215,6 +219,8 @@ fork(void)
    acquire(&ptable.lock);
  
    np->state = RUNNABLE;
@@ -90,7 +91,7 @@ index 806b1b1..4e2bcfb 100644
  
    release(&ptable.lock);
  
-@@ -320,7 +325,7 @@ wait(void)
+@@ -320,7 +326,7 @@ wait(void)
  //  - eventually that process transfers control
  //      via swtch back to the scheduler.
  void
@@ -99,7 +100,7 @@ index 806b1b1..4e2bcfb 100644
  {
    struct proc *p;
    struct cpu *c = mycpu();
-@@ -335,7 +340,8 @@ scheduler(void)
+@@ -335,7 +341,8 @@ scheduler(void)
      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
        if(p->state != RUNNABLE)
          continue;
@@ -109,7 +110,7 @@ index 806b1b1..4e2bcfb 100644
        // Switch to chosen process.  It is the process's job
        // to release ptable.lock and then reacquire it
        // before jumping back to us.
-@@ -349,12 +355,87 @@ scheduler(void)
+@@ -349,12 +356,92 @@ scheduler(void)
        // Process is done running for now.
        // It should have changed its p->state before coming back.
        c->proc = 0;
@@ -125,10 +126,13 @@ index 806b1b1..4e2bcfb 100644
 +getrandom(int mod)
 +{
 +  //https://en.wikipedia.org/wiki/Linear_congruential_generator
-+  rand_x = ((23*rand_x + 120) % mod);
++  // rand_x = ((23*rand_x + 120) % mod);
++  
++  // https://www.cs.virginia.edu/~cr4bd/4414/S2019/files/lcg_parkmiller_c.txt
++  rand_x = next_random() % mod; 
 +  return rand_x+1;
 +}
-+
+ 
 +void
 +scheduler(void)
 +{
@@ -136,6 +140,7 @@ index 806b1b1..4e2bcfb 100644
 +  struct cpu *c = mycpu();
 +  c->proc = 0;
 +  
++  uint start_ticks;
 +  int total_tickets, current_tickets, winner_ticket;
 +
 +  for(;;){
@@ -160,7 +165,7 @@ index 806b1b1..4e2bcfb 100644
 +    // get winner ticket
 +    winner_ticket = getrandom(total_tickets);
 +    // cprintf("Winner ticket : %d\n", winner_ticket);
- 
++
 +    // Loop over process table looking for process to run.
 +    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
 +      if(p->state != RUNNABLE) continue;
@@ -168,6 +173,7 @@ index 806b1b1..4e2bcfb 100644
 +      current_tickets += p->tickets;
 +      // cprintf("Current tickets : %d and current process ticket %d, state %d id %d\n", current_tickets, p->tickets, p->state, p->pid);
 +      if(current_tickets >= winner_ticket){
++        start_ticks = ticks;
 +        // Switch to chosen process.  It is the process's job
 +        // to release ptable.lock and then reacquire it
 +        // before jumping back to us.
@@ -181,7 +187,7 @@ index 806b1b1..4e2bcfb 100644
 +        // Process is done running for now.
 +        // It should have changed its p->state before coming back.
 +        c->proc = 0;
-+        p->ticks += 1;
++        p->ticks += (ticks - start_ticks);
 +        // cprintf("Process returned and state %d id %d\n", p->state, p->pid);
 +
 +        // now break to get new processor
@@ -197,7 +203,7 @@ index 806b1b1..4e2bcfb 100644
  // Enter scheduler.  Must hold only ptable.lock
  // and have changed proc->state. Saves and restores
  // intena because intena is a property of this
-@@ -532,3 +613,35 @@ procdump(void)
+@@ -532,3 +619,35 @@ procdump(void)
      cprintf("\n");
    }
  }
