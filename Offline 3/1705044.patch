@@ -61,7 +61,7 @@ index 82fb982..6189b15 100644
  // swtch.S
  void            swtch(struct context**, struct context*);
 diff --git a/proc.c b/proc.c
-index 806b1b1..091e776 100644
+index 806b1b1..8a74f18 100644
 --- a/proc.c
 +++ b/proc.c
 @@ -6,6 +6,8 @@
@@ -96,7 +96,7 @@ index 806b1b1..091e776 100644
  //      via swtch back to the scheduler.
  void
 -scheduler(void)
-+modified_scheduler(void)
++original_scheduler(void)
  {
    struct proc *p;
    struct cpu *c = mycpu();
@@ -110,7 +110,7 @@ index 806b1b1..091e776 100644
        // Switch to chosen process.  It is the process's job
        // to release ptable.lock and then reacquire it
        // before jumping back to us.
-@@ -349,12 +356,92 @@ scheduler(void)
+@@ -349,12 +356,98 @@ scheduler(void)
        // Process is done running for now.
        // It should have changed its p->state before coming back.
        c->proc = 0;
@@ -173,7 +173,6 @@ index 806b1b1..091e776 100644
 +      current_tickets += p->tickets;
 +      // cprintf("Current tickets : %d and current process ticket %d, state %d id %d\n", current_tickets, p->tickets, p->state, p->pid);
 +      if(current_tickets >= winner_ticket){
-+        start_ticks = ticks;
 +        // Switch to chosen process.  It is the process's job
 +        // to release ptable.lock and then reacquire it
 +        // before jumping back to us.
@@ -181,13 +180,20 @@ index 806b1b1..091e776 100644
 +        switchuvm(p);
 +        p->state = RUNNING;
 +
++        acquire(&tickslock);
++        start_ticks = ticks;
++        release(&tickslock);
++
 +        swtch(&(c->scheduler), p->context);
++        
++        acquire(&tickslock);
++        p->ticks += (ticks - start_ticks);
++        release(&tickslock);
 +        switchkvm();
 +
 +        // Process is done running for now.
 +        // It should have changed its p->state before coming back.
 +        c->proc = 0;
-+        p->ticks += (ticks - start_ticks);
 +        // cprintf("Process returned and state %d id %d\n", p->state, p->pid);
 +
 +        // now break to get new processor
@@ -203,7 +209,7 @@ index 806b1b1..091e776 100644
  // Enter scheduler.  Must hold only ptable.lock
  // and have changed proc->state. Saves and restores
  // intena because intena is a property of this
-@@ -532,3 +619,35 @@ procdump(void)
+@@ -532,3 +625,35 @@ procdump(void)
      cprintf("\n");
    }
  }
