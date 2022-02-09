@@ -16,7 +16,8 @@
 /Offline 2/Thread Example
 /Offline 3/xv6
 /Xv6
-/.vscode
+/**/*.vscode
 /Test
+/page
 
 
