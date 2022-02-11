@@ -41,7 +41,7 @@ index a280d2b..60300ad 100644
        break;
      case C('U'):  // Kill line.
 diff --git a/defs.h b/defs.h
-index 82fb982..9cea108 100644
+index 82fb982..a242563 100644
 --- a/defs.h
 +++ b/defs.h
 @@ -9,6 +9,8 @@ struct spinlock;
@@ -89,12 +89,15 @@ index 82fb982..9cea108 100644
  // spinlock.c
  void            acquire(struct spinlock*);
  void            getcallerpcs(void*, uint*);
-@@ -185,6 +206,9 @@ void            switchuvm(struct proc*);
+@@ -185,6 +206,12 @@ void            switchuvm(struct proc*);
  void            switchkvm(void);
  int             copyout(pde_t*, uint, void*, uint);
  void            clearpteu(pde_t *pgdir, char *uva);
 +// custom
 +void            printPTE(pde_t*, uint);
++void            print_proc_info(struct proc*);
++void            read_page_from_file(struct proc*, int, char*);
++void            write_page_to_file(struct proc*);
 +int             swap_in_and_out(struct proc*, uint);
  
  // number of elements in fixed-size array
@@ -1201,7 +1204,7 @@ index 0000000..54ef2b9
 + {
 +   uint off;
 diff --git a/proc.c b/proc.c
-index 806b1b1..61e5a02 100644
+index 806b1b1..dd8a956 100644
 --- a/proc.c
 +++ b/proc.c
 @@ -6,6 +6,7 @@
@@ -1221,7 +1224,7 @@ index 806b1b1..61e5a02 100644
  
    acquire(&ptable.lock);
  
-@@ -112,6 +113,45 @@ found:
+@@ -112,6 +113,47 @@ found:
    memset(p->context, 0, sizeof *p->context);
    p->context->eip = (uint)forkret;
  
@@ -1264,10 +1267,12 @@ index 806b1b1..61e5a02 100644
 +    p->all_pages[i].index = -1;  // change this to correct position when allocated
 +  }
 +
++  p->no_of_page_faults = 0;
++
    return p;
  }
  
-@@ -218,6 +258,72 @@ fork(void)
+@@ -218,6 +260,74 @@ fork(void)
  
    release(&ptable.lock);
  
@@ -1335,12 +1340,14 @@ index 806b1b1..61e5a02 100644
 +    if(curproc->all_pages[i].index == curproc->head->index) np->head = &np->all_pages[i];
 +    if(curproc->all_pages[i].index == curproc->tail->index) np->tail = &np->all_pages[i];
 +  }
++  np->no_of_page_faults = curproc->no_of_page_faults;
++
 +  }
 +  cprintf("In fork, parent id %d and child id %d\n", curproc->pid, np->pid);
    return pid;
  }
  
-@@ -234,6 +340,9 @@ exit(void)
+@@ -234,6 +344,9 @@ exit(void)
    if(curproc == initproc)
      panic("init exiting");
  
@@ -1350,15 +1357,15 @@ index 806b1b1..61e5a02 100644
    // Close all open files.
    for(fd = 0; fd < NOFILE; fd++){
      if(curproc->ofile[fd]){
-@@ -530,5 +639,76 @@ procdump(void)
+@@ -530,5 +643,76 @@ procdump(void)
          cprintf(" %p", pc[i]);
      }
      cprintf("\n");
 +
 +    /// see mappages and walkpgdir - https://www.youtube.com/watch?v=8V2YkO7lfvs
 +    printPTE(p->pgdir, p->sz);
-   }
- }
++  }
++}
 +
 +// queue functionalities
 +void 
@@ -1370,7 +1377,7 @@ index 806b1b1..61e5a02 100644
 +  if(cur_proc->head != 0) cur_proc->head->prev = page;
 +  else cur_proc->tail = page;
 +  cur_proc->head = page;
-+  cprintf("enqueue head va : %d, and index %d\n", page->va, page->index);
++  // cprintf("enqueue head va : %d, and index %d\n", page->va, page->index);
 +}
 +
 +struct page_struct*
@@ -1380,13 +1387,13 @@ index 806b1b1..61e5a02 100644
 +    panic("No element left in queue"); return 0;
 +  }
 +
-+  // REMEMBER : doesnt free the dequeued memory
++  // REMEMBER : dont free the dequeued memory
 +  struct page_struct* temp = cur_proc->tail;
 +  cur_proc->tail = temp->prev;
-+  temp->prev = 0;
++  temp->prev = 0; temp->next=0;
 +  if(cur_proc->tail == 0) cur_proc->head = 0; // nothing is left
 +  else cur_proc->tail->next = 0;
-+  cprintf("dequeue head va : %d, and index %d\n", temp->va, temp->index);
++  // cprintf("dequeue head va : %d, and index %d\n", temp->va, temp->index);
 +  return temp;
 +}
 +
@@ -1402,9 +1409,9 @@ index 806b1b1..61e5a02 100644
 +      cur_proc->all_pages[i].index = i; // set index
 +      return i;
 +    }
-+  }
+   }
 +  return -1; // this means no free pages
-+}
+ }
 +
 +
 +// struct file_offsets functions
@@ -1422,14 +1429,14 @@ index 806b1b1..61e5a02 100644
 +  struct file_offsets* temp;
 +  temp = cur_proc->free_file_pos;
 +  int index = temp->index;
-+  cprintf("popping file offset index %d\n", index);
++  // cprintf("popping file offset index %d\n", index);
 +  cur_proc->free_file_pos = temp->next;
 +  temp->next = 0; // clear next 
 +  return index;
 +}
 \ No newline at end of file
 diff --git a/proc.h b/proc.h
-index 1647114..50b7eb6 100644
+index 1647114..b5cd706 100644
 --- a/proc.h
 +++ b/proc.h
 @@ -34,6 +34,30 @@ struct context {
@@ -1437,7 +1444,7 @@ index 1647114..50b7eb6 100644
  enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
  
 +// For storing pages
-+#define MAX_PSYC_PAGES 2
++#define MAX_PSYC_PAGES 15
 +#define MAX_TOTAL_PAGES 30
 +#define MAX_SWAP_PAGES (MAX_TOTAL_PAGES - MAX_PSYC_PAGES)
 +
@@ -1463,7 +1470,7 @@ index 1647114..50b7eb6 100644
  // Per-process state
  struct proc {
    uint sz;                     // Size of process memory (bytes)
-@@ -49,6 +73,20 @@ struct proc {
+@@ -49,6 +73,24 @@ struct proc {
    struct file *ofile[NOFILE];  // Open files
    struct inode *cwd;           // Current directory
    char name[16];               // Process name (debugging)
@@ -1481,6 +1488,10 @@ index 1647114..50b7eb6 100644
 +
 +  int no_of_mem_pages;
 +  int no_of_swap_pages;
++
++  // need stuff for NRU
++
++  int no_of_page_faults;
  };
  
  // Process memory is laid out contiguously, low addresses first:
@@ -1956,23 +1967,1189 @@ index 0000000..bfe61b7
 +  fd[1] = fd1;
 +  return 0;
 +}
+diff --git a/temp.txt b/temp.txt
+new file mode 100644
+index 0000000..1273bf6
+--- /dev/null
++++ b/temp.txt
+@@ -0,0 +1,1156 @@
++allocating : Current proc id : 2, pgdir 0, oldsz 0, newsz 6576
++Allocated for page index 0, va 0, pgdir 234033159
++Allocated for page index 1, va 4096, pgdir 234033159
++############################ allocuvm end
++
++############################ allocuvm start
++allocating : Current proc id : 2, pgdir 234033159, oldsz 8192, newsz 16384
++Allocated for page index 2, va 8192, pgdir 234033159
++Allocated for page index 3, va 12288, pgdir 234033159
++############################ allocuvm end
++switched pgdir from 234315815 to 234033159
++free vm for page dir = 234315815
++
++############################ deallocuvm start
++DEALLOCATING : Current proc id : 2, proc pgdir 234033159, pgdir 234315815, oldsz -2147483648, newsz 0
++############################ deallocuvm end
++0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++(idx: 0, pgdir: 234033159, va: 0) -> (idx: 1, pgdir: 234033159, va: 4096) -> (idx: 2, pgdir: 234033159, va: 8192) -> 
++(idx: 3, pgdir: 234033159, va: 12288) -> 
++
++curproc swap files: 0, mem files 4
++Freevm done.
++
++$ test_page
++In fork, parent id 2 and child id 3
++
++############################ allocuvm start
++allocating : Current proc id : 3, pgdir 234311719, oldsz 16384, newsz 49152
++Allocated for page index 0, va 16384, pgdir 234311719
++Allocated for page index 1, va 20480, pgdir 234311719
++Allocated for page index 2, va 24576, pgdir 234311719
++Allocated for page index 3, va 28672, pgdir 234311719
++Allocated for page index 4, va 32768, pgdir 234311719
++Allocated for page index 5, va 36864, pgdir 234311719
++Allocated for page index 6, va 40960, pgdir 234311719
++Allocated for page index 7, va 45056, pgdir 234311719
++############################ allocuvm end
++In exec : , proc id is 3 and sz is 49152
++
++############################ allocuvm start
++allocating : Current proc id : 3, pgdir 0, oldsz 0, newsz 3412
++Allocated for page index 8, va 0, pgdir 233705479
++############################ allocuvm end
++
++############################ allocuvm start
++allocating : Current proc id : 3, pgdir 233705479, oldsz 4096, newsz 12288
++Allocated for page index 9, va 4096, pgdir 233705479
++Allocated for page index 10, va 8192, pgdir 233705479
++############################ allocuvm end
++switched pgdir from 234311719 to 233705479
++free vm for page dir = 234311719
++
++############################ deallocuvm start
++DEALLOCATING : Current proc id : 3, proc pgdir 233705479, pgdir 234311719, oldsz -2147483648, newsz 0
++Removing page index 0
++after deletion -> (idx: 1, pgdir: 234311719, va: 20480) -> (idx: 2, pgdir: 234311719, va: 24576) -> (idx: 3, pgdir: 23431 
++(idx: 4, pgdir: 234311719, va: 32768) -> (idx: 5, pgdir: 234311719, va: 36864) -> (idx: 6, pgdir: 234311719, va: 40960) - 
++(idx: 7, pgdir: 234311719, va: 45056) -> (idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479, va: 4096) -> 
++(idx: 10, pgdir: 233705479, va: 8192) -> 
++Removing page index 1
++after deletion -> (idx: 2, pgdir: 234311719, va: 24576) -> (idx: 3, pgdir: 234311719, va: 28672) -> (idx: 4, pgdir: 23431 
++(idx: 5, pgdir: 234311719, va: 36864) -> (idx: 6, pgdir: 234311719, va: 40960) -> (idx: 7, pgdir: 234311719, va: 45056) - 
++(idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479, va: 4096) -> (idx: 10, pgdir: 233705479, va: 8192) -> 
++
++Removing page index 2
++after deletion -> (idx: 3, pgdir: 234311719, va: 28672) -> (idx: 4, pgdir: 234311719, va: 32768) -> (idx: 5, pgdir: 23431 
++(idx: 6, pgdir: 234311719, va: 40960) -> (idx: 7, pgdir: 234311719, va: 45056) -> (idx: 8, pgdir: 233705479, va: 0) -> 
++(idx: 9, pgdir: 233705479, va: 4096) -> (idx: 10, pgdir: 233705479, va: 8192) -> 
++Removing page index 3
++after deletion -> (idx: 4, pgdir: 234311719, va: 32768) -> (idx: 5, pgdir: 234311719, va: 36864) -> (idx: 6, pgdir: 23431 
++(idx: 7, pgdir: 234311719, va: 45056) -> (idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479, va: 4096) -> 
++(idx: 10, pgdir: 233705479, va: 8192) -> 
++Removing page index 4
++after deletion -> (idx: 5, pgdir: 234311719, va: 36864) -> (idx: 6, pgdir: 234311719, va: 40960) -> (idx: 7, pgdir: 23431 
++(idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479, va: 4096) -> (idx: 10, pgdir: 233705479, va: 8192) -> 
++
++Removing page index 5
++after deletion -> (idx: 6, pgdir: 234311719, va: 40960) -> (idx: 7, pgdir: 234311719, va: 45056) -> (idx: 8, pgdir: 23370 
++(idx: 9, pgdir: 233705479, va: 4096) -> (idx: 10, pgdir: 233705479, va: 8192) -> 
++Removing page index 6
++after deletion -> (idx: 7, pgdir: 234311719, va: 45056) -> (idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479 
++(idx: 10, pgdir: 233705479, va: 8192) -> 
++Removing page index 7
++after deletion -> (idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479, va: 4096) -> (idx: 10, pgdir: 233705479 
++
++############################ deallocuvm end
++0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++(idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479, va: 4096) -> (idx: 10, pgdir: 233705479, va: 8192) -> 
++
++
++curproc swap files: 0, mem files 3
++Freevm done.
++
++
++############################ allocuvm start
++allocating : Current proc id : 3, pgdir 233705511, oldsz 12288, newsz 81928
++Allocated for page index 0, va 12288, pgdir 233705511
++Allocated for page index 1, va 16384, pgdir 233705511
++Allocated for page index 2, va 20480, pgdir 233705511
++Allocated for page index 3, va 24576, pgdir 233705511
++Allocated for page index 4, va 28672, pgdir 233705511
++Allocated for page index 5, va 32768, pgdir 233705511
++Allocated for page index 6, va 36864, pgdir 233705511
++Allocated for page index 7, va 40960, pgdir 233705511
++Allocated for page index 11, va 45056, pgdir 233705511
++Allocated for page index 12, va 49152, pgdir 233705511
++Allocated for page index 13, va 53248, pgdir 233705511
++Allocated for page index 14, va 57344, pgdir 233705511
++
++## STARTING WRITE OP ##Writing page 8 into swap file using file index 0
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 14, SWAP_PAGES: 1
++Pages in memory : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> 
++Pages in file : 
++(idx: 8, pgdir: 233705511, va: 0) -> 
++Free file index : 
++1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++Allocated for page index 15, va 61440, pgdir 233705511
++
++## STARTING WRITE OP ##Writing page 9 into swap file using file index 1
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 14, SWAP_PAGES: 2
++Pages in memory : 
++(idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) - 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> 
++Pages in file : 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++Free file index : 
++2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++Allocated for page index 16, va 65536, pgdir 233705511
++
++## STARTING WRITE OP ##Writing page 10 into swap file using file index 2
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 14, SWAP_PAGES: 3
++Pages in memory : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> 
++Pages in file : 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 9, pgdir: 233705511, va: 4096) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++
++Free file index : 
++3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++Allocated for page index 17, va 69632, pgdir 233705511
++
++## STARTING WRITE OP ##Writing page 0 into swap file using file index 3
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 14, SWAP_PAGES: 4
++Pages in memory : 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> 
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++(idx: 10, pgdir: 233705511, va: 8192) -> 
++Free file index : 
++4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++Allocated for page index 18, va 73728, pgdir 233705511
++
++## STARTING WRITE OP ##Writing page 1 into swap file using file index 4
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 14, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536 
++(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> 
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++Free file index : 
++5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++Allocated for page index 19, va 77824, pgdir 233705511
++
++## STARTING WRITE OP ##Writing page 2 into swap file using file index 5
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 14, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> 
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 9, pgdir: 233705511, va: 4096) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++Allocated for page index 20, va 81920, pgdir 233705511
++############################ allocuvm end
++In trap : va: 1218, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 0
++IN TRAP
++memory location at page index : 8 and file offset 0
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++(idx: 8, pgdir: 233705511, va: 0) -> 
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++Free file index : 
++0 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 3 into swap file using file index 0
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728 
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 9, pgdir: 233705511, va: 4096) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 12140, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 8192
++IN TRAP
++memory location at page index : 10 and file offset 2
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728 
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++(idx: 10, pgdir: 233705511, va: 8192) -> 
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++Free file index : 
++2 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 4 into swap file using file index 2
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536 
++(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824 
++(idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 12292, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 12288
++IN TRAP
++memory location at page index : 0 and file offset 3
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536 
++(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824 
++(idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++(idx: 0, pgdir: 233705511, va: 12288) -> 
++Pages in file : 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++Free file index : 
++3 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 5 into swap file using file index 3
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> 
++
++Pages in file : 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++#####################
++################
++################### ALLOCATION DONE1 
++In trap : va: 16384, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 16384
++IN TRAP
++memory location at page index : 1 and file offset 4
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> 
++(idx: 1, pgdir: 233705511, va: 16384) -> 
++Pages in file : 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++Free file index : 
++4 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 6 into swap file using file index 4
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728 
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++(idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) - 
++
++Pages in file : 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 20480, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 20480
++IN TRAP
++memory location at page index : 2 and file offset 5
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728 
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++(idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) - 
++(idx: 2, pgdir: 233705511, va: 20480) -> 
++Pages in file : 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++Free file index : 
++5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 7 into swap file using file index 5
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536 
++(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824 
++(idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++
++Pages in file : 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 24576, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 24576
++IN TRAP
++memory location at page index : 3 and file offset 0
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536 
++(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824 
++(idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> 
++Pages in file : 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++Free file index : 
++0 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 11 into swap file using file index 0
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++
++Pages in file : 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 9, pgdir: 233705511, va: 4096) -> (idx: 11, pgdir: 233705511, va: 45056) - 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 28672, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 28672
++IN TRAP
++memory location at page index : 4 and file offset 2
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++(idx: 4, pgdir: 233705511, va: 28672) -> 
++Pages in file : 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 11, pgdir: 233705511, va: 45056) -> 
++Free file index : 
++2 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 12 into swap file using file index 2
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728 
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++(idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) - 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++
++Pages in file : 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152)  
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 32768, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 32768
++IN TRAP
++memory location at page index : 5 and file offset 3
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728 
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++(idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) - 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++(idx: 5, pgdir: 233705511, va: 32768) -> 
++Pages in file : 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> 
++Free file index : 
++3 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 13 into swap file using file index 3
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536 
++(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824 
++(idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++
++Pages in file : 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 36864, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 36864
++IN TRAP
++memory location at page index : 6 and file offset 4
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536 
++(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824 
++(idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> 
++Pages in file : 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 9, pgdir: 233705511, va: 4096) -> (idx: 11, pgdir: 233705511, va: 45056) - 
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> 
++Free file index : 
++4 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 14 into swap file using file index 4
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++
++Pages in file : 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 9, pgdir: 233705511, va: 4096) -> (idx: 11, pgdir: 233705511, va: 45056) - 
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 40960, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 40960
++IN TRAP
++memory location at page index : 7 and file offset 5
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> 
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152)  
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> 
++Free file index : 
++5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 15 into swap file using file index 5
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728 
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++(idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) - 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152)  
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 45056, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 45056
++IN TRAP
++memory location at page index : 11 and file offset 0
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728 
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++(idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) - 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++(idx: 11, pgdir: 233705511, va: 45056) -> 
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248)  
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> 
++Free file index : 
++0 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 16 into swap file using file index 0
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824 
++(idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
++
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248)  
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 49152, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 49152
++IN TRAP
++memory location at page index : 12 and file offset 2
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824 
++(idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
++(idx: 12, pgdir: 233705511, va: 49152) -> 
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344)  
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> 
++Free file index : 
++2 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 17 into swap file using file index 2
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
++
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344)  
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 53248, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 53248
++IN TRAP
++memory location at page index : 13 and file offset 3
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
++(idx: 13, pgdir: 233705511, va: 53248) -> 
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440)  
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> 
++Free file index : 
++3 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 18 into swap file using file index 3
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++(idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) - 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
++
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440)  
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 57344, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 57344
++IN TRAP
++memory location at page index : 14 and file offset 4
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++(idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) - 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
++(idx: 14, pgdir: 233705511, va: 57344) -> 
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536)  
++(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> 
++Free file index : 
++4 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 19 into swap file using file index 4
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536)  
++(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 61440, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 61440
++IN TRAP
++memory location at page index : 15 and file offset 5
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 20, pgdir: 233705511, va: 81920) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++(idx: 15, pgdir: 233705511, va: 61440) -> 
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632)  
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> 
++Free file index : 
++5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 20 into swap file using file index 5
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
++
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632)  
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 65536, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 65536
++IN TRAP
++memory location at page index : 16 and file offset 0
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
++(idx: 16, pgdir: 233705511, va: 65536) -> 
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728)  
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> 
++Free file index : 
++0 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 8 into swap file using file index 0
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) - 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536 
++
++Pages in file : 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 9, pgdir: 233705511, va: 4096) -> (idx: 17, pgdir: 233705511, va: 69632) -> 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 336, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 0
++IN TRAP
++memory location at page index : 8 and file offset 0
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) - 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536 
++(idx: 8, pgdir: 233705511, va: 0) -> 
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728)  
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> 
++Free file index : 
++0 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 10 into swap file using file index 0
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 17, pgdir: 233705511, va: 69632) - 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 69632, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 69632
++IN TRAP
++memory location at page index : 17 and file offset 2
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++(idx: 17, pgdir: 233705511, va: 69632) -> 
++Pages in file : 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 18, pgdir: 233705511, va: 73728) - 
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> 
++Free file index : 
++2 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 0 into swap file using file index 2
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 17, pgdir: 233705511, va: 69632) -> 
++
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 9, pgdir: 233705511, va: 4096) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 73728, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 73728
++IN TRAP
++memory location at page index : 18 and file offset 3
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 17, pgdir: 233705511, va: 69632) -> 
++(idx: 18, pgdir: 233705511, va: 73728) -> 
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 9, pgdir: 233705511, va: 4096) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> 
++Free file index : 
++3 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 1 into swap file using file index 3
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> 
++
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++(idx: 10, pgdir: 233705511, va: 8192) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 77824, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 77824
++IN TRAP
++memory location at page index : 19 and file offset 4
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
++(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
++(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
++(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536 
++(idx: 8, pgdir: 233705511, va: 0) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> 
++(idx: 19, pgdir: 233705511, va: 77824) -> 
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
++(idx: 10, pgdir: 233705511, va: 8192) -> (idx: 20, pgdir: 233705511, va: 81920) -> 
++Free file index : 
++4 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 2 into swap file using file index 4
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824 
++
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 20, pgdir: 233705511, va: 81920) - 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 81920, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 81920
++IN TRAP
++memory location at page index : 20 and file offset 5
++
++## STARTING READ OP ##PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5
++Pages in memory : 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
++(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
++(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
++(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 8, pgdir: 233705511, va: 0) -> 
++(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824 
++(idx: 20, pgdir: 233705511, va: 81920) -> 
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 9, pgdir: 233705511, va: 4096) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++Free file index : 
++5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED READ OP ##
++
++## STARTING WRITE OP ##Writing page 3 into swap file using file index 5
++After write : 
++PROC STATE ---------------------------------------------------
++Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6
++Pages in memory : 
++(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
++(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
++(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
++(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 8, pgdir: 233705511, va: 0) -> (idx: 17, pgdir: 233705511, va: 69632) -> 
++(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
++
++Pages in file : 
++(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
++(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 9, pgdir: 233705511, va: 4096) -> (idx: 10, pgdir: 233705511, va: 8192) -> 
++
++Free file index : 
++6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++---------------------------------------------------------------
++## FINISHED WRITE OP ##
++############################ trap swap inout end
++In trap : va: 86016, pgdir: 233705511, pid: 3, user: 3
++
++############################ trap swap inout start
++New va : 86016
++lapicid 0: panic: Page doesn't exist in file. But flag is set
++ 80108527 80106442 80106113 0 0 0 0 0 0 0
++
 diff --git a/test_page.c b/test_page.c
 new file mode 100644
-index 0000000..35dd399
+index 0000000..6dffe3e
 --- /dev/null
 +++ b/test_page.c
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,86 @@
 +#include "types.h"
 +#include "stat.h"
 +#include "user.h"
++
 +
 +void dummy()
 +{
 +
 +    // todo : make malloc before fork
 +    int sz = 4096*17;
-+    int pid = fork();
 +    int k;
++    int pid = fork();
++    int* mem = (int*) malloc(sz);
++    // int pid = fork();
++
 +
 +    if(pid == 0){
 +        k = 17;
@@ -1981,7 +3158,6 @@ index 0000000..35dd399
 +        k = 13;
 +    }
 +
-+    int* mem = (int*) malloc(sz);
 +    for(int i=0; i<sz/4; i++){
 +        mem[i] = k*i;
 +    }
@@ -2008,30 +3184,32 @@ index 0000000..35dd399
 +{
 +
 +    // todo : make malloc before fork
-+    int sz = 4096*17;
++    int *a;
++    int n = 20000;
 +
-+    int k = 1;
-+
-+    int* mem = (int*) malloc(sz);
++    a = malloc(n*sizeof(int));
 +
 +    printf(2, "#####################\n################\n################### ALLOCATION DONE1 \n");
 +
-+    for(int i=0; i<sz; i++){
-+        mem[i] = k*i;
++    for(int i=0; i<n; i++){
++        a[i] = i;
 +    }
 +
 +    printf(2, "#####################\n################\n################### ALLOCATION DONE2\n");
 +
 +    int count=0;
-+    for(int i=0; i<sz; i++){
-+        if(mem[i] != k*i) count+=1;
++    for(int i=0; i<n; i++){
++        if(a[i] != i) count+=1;
 +    }
++
++
 +
 +    printf(2, "######################################################## RESULT \n");
 +    printf(2, "Number of misses = %d\n", count);
 +
-+    free((void*)mem);
++    free((void*)a);
 +    printf(2, "######################################################## RESULT END\n");
++
 +
 +}
 +
@@ -2039,13 +3217,13 @@ index 0000000..35dd399
 +int
 +main(int argc, char *argv[])
 +{
-+    dummy_easy();
-+    // dummy();
++    // dummy_easy();
++    dummy();
 +    exit();
 +}
 \ No newline at end of file
 diff --git a/trap.c b/trap.c
-index 41c66eb..bb2aa53 100644
+index 41c66eb..50f7278 100644
 --- a/trap.c
 +++ b/trap.c
 @@ -36,6 +36,10 @@ idtinit(void)
@@ -2059,7 +3237,7 @@ index 41c66eb..bb2aa53 100644
    if(tf->trapno == T_SYSCALL){
      if(myproc()->killed)
        exit();
-@@ -78,6 +82,19 @@ trap(struct trapframe *tf)
+@@ -78,6 +82,20 @@ trap(struct trapframe *tf)
      lapiceoi();
      break;
  
@@ -2067,8 +3245,9 @@ index 41c66eb..bb2aa53 100644
 +  case T_PGFLT:
 +    page_fault_va = rcr2();
 +    curproc = myproc();
++    curproc->no_of_page_faults += 1;
 +    cprintf("In trap : va: %d, pgdir: %d, pid: %d, user: %d\n", page_fault_va, *curproc->pgdir, curproc->pid, tf->cs&3);
-+
++    
 +    // if not init or shell
 +    if((curproc->pid > 2)){ // && ((tf->cs&3) == DPL_USER)){
 +      // if this has PTE_PG set (checked inside func)
@@ -2080,7 +3259,7 @@ index 41c66eb..bb2aa53 100644
    default:
      if(myproc() == 0 || (tf->cs&3) == 0){
 diff --git a/vm.c b/vm.c
-index 7134cff..331a84c 100644
+index 7134cff..063af67 100644
 --- a/vm.c
 +++ b/vm.c
 @@ -6,6 +6,7 @@
@@ -2114,7 +3293,7 @@ index 7134cff..331a84c 100644
  }
  
  // Create PTEs for virtual addresses starting at va that refer to
-@@ -216,21 +219,120 @@ loaduvm(pde_t *pgdir, char *addr, struct inode *ip, uint offset, uint sz)
+@@ -216,6 +219,46 @@ loaduvm(pde_t *pgdir, char *addr, struct inode *ip, uint offset, uint sz)
    return 0;
  }
  
@@ -2145,12 +3324,14 @@ index 7134cff..331a84c 100644
 +
 +void print_file(struct proc* curproc)
 +{
-+  cprintf("In swap files : ");
-+  int i;
++  // cprintf("In swap files : ");
++  int i, j=1;
 +  for(i=0; i<MAX_TOTAL_PAGES; i++)
 +  {
 +    if(curproc->all_pages[i].file_index != -1){
 +      cprintf("(idx: %d, pgdir: %d, va: %d) -> ", curproc->all_pages[i].index, *curproc->all_pages[i].pgdir, curproc->all_pages[i].va);
++      if(j%3 == 0) cprintf("\n");
++      j += 1;
 +    }
 +  }
 +  cprintf("\n");
@@ -2159,13 +3340,11 @@ index 7134cff..331a84c 100644
  // Allocate page tables and physical memory to grow process from oldsz to
  // newsz, which need not be page aligned.  Returns new size or 0 on error.
  int
- allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
+@@ -223,14 +266,43 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
  {
    char *mem;
--  uint a;
-+  uint a, va_replace;
-+  int temp_index, page_index;
-+  struct page_struct* temp;
+   uint a;
++  int page_index;
 +
 +  struct proc* curproc = myproc();
 +  cprintf("\n############################ allocuvm start\n");
@@ -2175,7 +3354,7 @@ index 7134cff..331a84c 100644
 +    here shell is forked from init
 +    and others are forked from shell?
 +
-+    so need all to get the info too .. and only page when pid > 2
++    so need all to get the info too .. (actually we dont) and only page when pid > 2
 +  */
  
    if(newsz >= KERNBASE)
@@ -2185,7 +3364,6 @@ index 7134cff..331a84c 100644
  
 -  a = PGROUNDUP(oldsz);
 +  a = PGROUNDUP(oldsz); // only grow from oldsz to newsz
-+
 +  
    for(; a < newsz; a += PGSIZE){
 +    // if MAX_TOTAL_PAGES exceeded
@@ -2195,49 +3373,19 @@ index 7134cff..331a84c 100644
 +      return 0;
 +    }
 +
-+    // when oldsz=0, newsz is < PGSIZE
++    // when oldsz=0, newsz is < MAX_PSYC_PAGES
 +    // so can easily do this
 +    // write a page to swap and free the file
 +    // when no of memory pages has exceed MAX_PSYC_PAGES
 +    if((curproc->pid > 2) && (curproc->no_of_mem_pages >= MAX_PSYC_PAGES)){
-+      // select replacement page
-+      // for FIFO its the first page added
-+      temp = dequeue_page(curproc);
-+      va_replace = temp->va;
-+      temp_index = pop_file_offsets(curproc); // get file space
-+      cprintf("Writing page %d into swap file using index %d\n", temp->index, temp_index);
-+      writeToSwapFile(curproc, (char*)PTE_ADDR(va_replace), temp_index*PGSIZE, PGSIZE);
-+      curproc->all_pages[temp->index].file_index = temp_index;
-+      curproc->no_of_swap_pages += 1;
-+      curproc->no_of_mem_pages -= 1; // decrement no of pages in memory
-+
-+      // checking write
-+      // int i;
-+      // char buffer[PGSIZE/4] = "";
-+      // readFromSwapFile(curproc, buffer, temp_index*PGSIZE, PGSIZE/4);
-+      // char* temp_buff = (char*) PTE_ADDR(va_replace);
-+      // cprintf("BEFORE : \n");
-+      // for(i=0; i<PGSIZE/4; i++) cprintf("%d ", temp_buff[i]);
-+      // cprintf("\nAFTER : \n");
-+      // for(i=0; i<PGSIZE/4; i++) cprintf("%d ", buffer[i]);
-+      // cprintf("\n");
-+
-+      pte_t* pte = walkpgdir(curproc->all_pages[temp->index].pgdir, (int*)va_replace, 0);
-+      cprintf("pte for kfree is %d\n", *pte);
-+      // free this memory
-+      kfree((char*)P2V(PTE_ADDR(*pte)));
-+      // set flags
-+      // *pte |= PTE_W | PTE_U | PTE_PG;
-+      *pte |= PTE_PG;
-+      *pte &= ~PTE_P; // not present  
-+
-+      lcr3(V2P(pgdir)); // refresh TLB 
++      // write and free memory
++      write_page_to_file(curproc);
 +    }
 +
      mem = kalloc();
      if(mem == 0){
        cprintf("allocuvm out of memory\n");
-@@ -244,7 +346,35 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
+@@ -244,7 +316,36 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
        kfree(mem);
        return 0;
      }
@@ -2251,7 +3399,8 @@ index 7134cff..331a84c 100644
 +    curproc->all_pages[page_index].pgdir = pgdir;
 +    curproc->no_of_mem_pages += 1; // increment no of pages in memory
 +    // cprintf("memory grown to %d\n", curproc->no_of_mem_pages);
-+    print_fifo(curproc->tail);
++    // print_fifo(curproc->tail);
++    cprintf("Allocated for page index %d, va %d, pgdir %d\n", page_index, a, *pgdir);
 +
    }
 +
@@ -2273,7 +3422,7 @@ index 7134cff..331a84c 100644
    return newsz;
  }
  
-@@ -257,24 +387,96 @@ deallocuvm(pde_t *pgdir, uint oldsz, uint newsz)
+@@ -257,24 +358,97 @@ deallocuvm(pde_t *pgdir, uint oldsz, uint newsz)
  {
    pte_t *pte;
    uint a, pa;
@@ -2294,6 +3443,26 @@ index 7134cff..331a84c 100644
      pte = walkpgdir(pgdir, (char*)a, 0);
      if(!pte)
        a = PGADDR(PDX(a) + 1, 0, 0) - PGSIZE;
++
++
++    // deallocate a page in swap file
++    else if((*pte & PTE_PG) != 0){
++      *pte = 0;
++      for(i=0; i<MAX_TOTAL_PAGES; i++){
++        if((curproc->all_pages[i].va == a) && (curproc->all_pages[i].pgdir == pgdir) && (curproc->all_pages[i].file_index != -1)){
++          push_file_offsets(curproc, curproc->all_pages[i].file_index);
++          cprintf("Removing page index: %d\n", curproc->all_pages[i].index);
++          curproc->no_of_swap_pages -= 1;
++          curproc->all_pages[i].va = -1;
++          curproc->all_pages[i].pgdir = 0;
++          curproc->all_pages[i].index = -1;
++          curproc->all_pages[i].file_index = -1;
++          curproc->all_pages[i].next = 0;
++          curproc->all_pages[i].prev = 0;
++          break;
++        }
++      }
++    }
 +    
 +    // deallocate a page in memory
      else if((*pte & PTE_P) != 0){
@@ -2308,7 +3477,7 @@ index 7134cff..331a84c 100644
 +        temp = curproc->tail;
 +        while(temp != 0)
 +        {
-+          // cprintf("pgdir %d and ll pgdir %d\n", *pgdir, temp->pgdir);
++          // cprintf("pgdir %d and ll pgdir %d; va is %d and ll va is %d\n", *pgdir, *temp->pgdir, a, temp->va);
 +          if((temp->va == a) && (temp->pgdir == pgdir)){
 +            // remove this from linklist
 +            if (temp->prev != 0) temp->prev->next = temp->next;
@@ -2341,25 +3510,6 @@ index 7134cff..331a84c 100644
        *pte = 0;
      }
 +
-+    // deallocate a page in swap file
-+    else if((*pte & PTE_PG) != 0){
-+      for(i=0; i<MAX_TOTAL_PAGES; i++){
-+        if((curproc->all_pages[i].va == a) && (curproc->all_pages[i].pgdir == pgdir)){
-+          push_file_offsets(curproc, curproc->all_pages[i].file_index);
-+          cprintf("Removing page index: %d\n", curproc->all_pages[i].index);
-+          curproc->no_of_swap_pages -= 1;
-+          curproc->all_pages[i].va = -1;
-+          curproc->all_pages[i].pgdir = 0;
-+          curproc->all_pages[i].index = -1;
-+          curproc->all_pages[i].file_index = -1;
-+          curproc->all_pages[i].next = 0;
-+          curproc->all_pages[i].prev = 0;
-+          break;
-+        }
-+      }
-+    }
-+    
-+
    }
 +
 +  cprintf("############################ deallocuvm end\n");
@@ -2370,7 +3520,7 @@ index 7134cff..331a84c 100644
    return newsz;
  }
  
-@@ -284,7 +486,8 @@ void
+@@ -284,7 +458,8 @@ void
  freevm(pde_t *pgdir)
  {
    uint i;
@@ -2380,7 +3530,7 @@ index 7134cff..331a84c 100644
    if(pgdir == 0)
      panic("freevm: no pgdir");
    deallocuvm(pgdir, KERNBASE, 0);
-@@ -295,6 +498,7 @@ freevm(pde_t *pgdir)
+@@ -295,6 +470,7 @@ freevm(pde_t *pgdir)
      }
    }
    kfree((char*)pgdir);
@@ -2388,7 +3538,7 @@ index 7134cff..331a84c 100644
  }
  
  // Clear PTE_U on a page. Used to create an inaccessible
-@@ -316,7 +520,7 @@ pde_t*
+@@ -316,7 +492,7 @@ pde_t*
  copyuvm(pde_t *pgdir, uint sz)
  {
    pde_t *d;
@@ -2397,19 +3547,27 @@ index 7134cff..331a84c 100644
    uint pa, i, flags;
    char *mem;
  
-@@ -325,6 +529,11 @@ copyuvm(pde_t *pgdir, uint sz)
+@@ -325,8 +501,19 @@ copyuvm(pde_t *pgdir, uint sz)
    for(i = 0; i < sz; i += PGSIZE){
      if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
        panic("copyuvm: pte should exist");
++    
++    // TODO : recheck this
 +    if (*pte & PTE_PG){
 +      temp_pte = walkpgdir(d, (void*) i, 1); // allocate page table entries
-+      *temp_pte = PTE_U | PTE_W | PTE_PG;
++      *temp_pte |= PTE_U | PTE_W | PTE_PG;
++      *temp_pte &= ~PTE_P;
++      lcr3(V2P(d));
 +      continue;
 +    }
++    
      if(!(*pte & PTE_P))
        panic("copyuvm: page not present");
++    
      pa = PTE_ADDR(*pte);
-@@ -392,3 +601,180 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
+     flags = PTE_FLAGS(*pte);
+     if((mem = kalloc()) == 0)
+@@ -392,3 +579,210 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
  //PAGEBREAK!
  // Blank page.
  
@@ -2460,40 +3618,28 @@ index 7134cff..331a84c 100644
 +}
 +
 +
-+
-+
-+
-+
 +int swap_in_and_out(struct proc* curproc, uint va){
 +  cprintf("\n############################ trap swap inout start\n");
 +
 +  va = PGROUNDDOWN(va);
 +  cprintf("New va : %d\n", va);
-+
-+  // pte_t* read_pte = walkpgdir(curproc->pgdir, (char*) va, 0);
-+  // if(!(*read_pte & PTE_PG)){
-+  //   cprintf("Not a swapped file case\n");
-+  //   return 0;
-+  // }
-+  
 +  
 +  // find the appropriate memory
-+  int demand_page_index, file_offset=-1, read_count, temp_index;
-+  struct page_struct* temp;
++  int demand_page_index, file_offset=-1;
 +  pde_t* pgdir = 0;
-+  uint va_replace;
 +
 +  for(demand_page_index=0; demand_page_index<MAX_TOTAL_PAGES; demand_page_index++){
 +    // if(curproc->all_pages[demand_page_index].va == va && curproc->all_pages[demand_page_index].pgdir == curproc->pgdir){
-+    if(curproc->all_pages[demand_page_index].va == va && curproc->all_pages[demand_page_index].file_index != -1){
++    if(curproc->all_pages[demand_page_index].va == va){// && curproc->all_pages[demand_page_index].file_index != -1){
 +      file_offset = curproc->all_pages[demand_page_index].file_index;
 +      pgdir = curproc->all_pages[demand_page_index].pgdir;
-+      if(file_offset == -1){
-+        panic("Page doesn't exist in file. But flag is set");
-+        return 0;
-+      }
 +      break;
 +    }
++  }
++
++  if(file_offset == -1){
++    panic("Page doesn't exist in file. But flag is set");
++    return 0;
 +  }
 +
 +  pte_t* read_pte = walkpgdir(pgdir, (char*) va, 0);
@@ -2503,90 +3649,132 @@ index 7134cff..331a84c 100644
 +  }
 +  cprintf("IN TRAP\nmemory location at page index : %d and file offset %d\n", demand_page_index, file_offset);
 +
++  // do read op
 +  // now update new stuff
 +  // allocate new memory
 +  char* new_mem = kalloc();
 +  memset(new_mem, 0, PGSIZE);
-+
-+  char buffer[PGSIZE/2] = "";
-+  memset(buffer, 0, PGSIZE/2);
-+
-+  // read page from file
-+  read_count = readFromSwapFile(curproc, buffer, file_offset*PGSIZE, PGSIZE/2);
-+  cprintf("done reading1 %d\n", read_count);
-+  memmove(new_mem, buffer, PGSIZE/2);
-+  memset(buffer, 0, PGSIZE/2);
-+
-+  if ((readFromSwapFile(curproc, buffer, file_offset*PGSIZE + PGSIZE/2, PGSIZE/2) + read_count) != PGSIZE) {
-+    panic("Something wrong with reading from page file");
-+    return 0;
-+  }
-+
-+  memmove(new_mem + PGSIZE/2, buffer, PGSIZE/2);
-+
-+  // // read page from file
-+  // read_count = readFromSwapFile(curproc, (char*) va, file_offset*PGSIZE, PGSIZE/2);
-+  // cprintf("done reading1 %d\n", read_count);
-+
-+  // if ((readFromSwapFile(curproc, (char*) (va + PGSIZE/2), file_offset*PGSIZE + PGSIZE/2, PGSIZE/2)
-+  //  + read_count) != PGSIZE) {
-+  //   panic("Something wrong with reading from page file");
-+  //   return 0;
-+  // }
-+
-+  curproc->all_pages[demand_page_index].file_index = -1;
-+  push_file_offsets(curproc, file_offset);
-+  cprintf("after file offset enqueue: ");
-+  print_file_fifo(curproc->free_file_pos);
++  read_page_from_file(curproc, demand_page_index, new_mem);
 +
 +  // if memory full
 +  if(curproc->no_of_mem_pages >= MAX_PSYC_PAGES){
-+    // now write
-+    // select replacement page
-+    // for FIFO its the first page added
-+    temp = dequeue_page(curproc);
-+    va_replace = temp->va;
-+    temp_index = pop_file_offsets(curproc); // get file space
-+
-+    cprintf("after file offset dequeue: ");
-+    print_file_fifo(curproc->free_file_pos);
-+
-+    cprintf("after trap IN swap out : Writing page %d into swap file using file index %d\n", temp->index, temp_index);
-+    writeToSwapFile(curproc, (char*) PTE_ADDR(va_replace), temp_index*PGSIZE, PGSIZE);
-+    curproc->all_pages[temp->index].file_index = temp_index;
-+    curproc->no_of_swap_pages += 1; // TODO : add max swap condition
-+    curproc->no_of_mem_pages -= 1; // decrement no of pages in memory
-+
-+    pte_t* write_pte = walkpgdir(curproc->all_pages[temp->index].pgdir, (int*)va_replace, 0);
-+    // free this memory
-+    kfree((char*)P2V(PTE_ADDR(*write_pte)));
-+    // set flags
-+    *write_pte |= PTE_PG;
-+    *write_pte &= ~PTE_P; // not present  
-+    lcr3(V2P(curproc->pgdir)); // refresh TLB
++    write_page_to_file(curproc);
 +  }
-+  
 +
-+  
-+  if(mappages(curproc->pgdir, (char*)va, PGSIZE, V2P(new_mem), PTE_W|PTE_U) < 0){
-+    cprintf("allocuvm out of memory (2)\n");
-+    kfree(new_mem);
++  // map the pages - to old pgdir? 
++  // this adds PTE_P too
++  if(mappages(pgdir, (char*)va, PGSIZE, V2P(new_mem), PTE_W|PTE_U) < 0){
++    panic("allocuvm out of memory after read\n");
++    // cprintf("allocuvm out of memory (2)\n");
++    // kfree(new_mem);
 +    return 0;
 +  }
 +
-+  // update appropriate flags
-+  // *pte &= ~PTE_PG; // isnt in the swap file no more -> doing this in trap func
-+  enqueue_page(curproc, &curproc->all_pages[demand_page_index]);
-+  print_fifo(curproc->tail);
-+  print_file(curproc);
-+
-+  curproc->all_pages[demand_page_index].pgdir = curproc->pgdir;
-+  curproc->no_of_mem_pages += 1; // increment no of pages in memory
-+  cprintf("memory swapped, size is %d\n", curproc->no_of_mem_pages);
++  // update PG flag
 +  *read_pte &= ~PTE_PG;
-+  lcr3(V2P(curproc->pgdir));
-+
++  lcr3(V2P(pgdir));
 +  cprintf("############################ trap swap inout end\n");
-+
 +  return 1;
 +}
++
++
++void
++print_proc_info(struct proc* curproc)
++{
++  cprintf("PROC STATE ---------------------------------------------------\n");
++  cprintf("Proc ID: %d, PGDIR: %d, MEM_PAGES: %d, SWAP_PAGES: %d, PAGE_FAULTS: %d\n", 
++          curproc->pid, *curproc->pgdir, curproc->no_of_mem_pages, curproc->no_of_swap_pages, curproc->no_of_page_faults);
++  cprintf("Pages in memory : \n");
++  print_fifo(curproc->tail);
++  cprintf("Pages in file : \n");
++  print_file(curproc);
++  cprintf("Free file index : \n");
++  print_file_fifo(curproc->free_file_pos);
++  cprintf("---------------------------------------------------------------\n");
++}
++
++
++// doesnt update flags
++void
++read_page_from_file(struct proc* curproc, int demand_page_index, char* new_mem)
++{
++  cprintf("\n## STARTING READ OP ##");
++
++  int read_count=0, frac=2, idx=0;
++  int file_offset = curproc->all_pages[demand_page_index].file_index;
++  char buffer[PGSIZE/frac];
++
++  // read page from file
++  while(idx != frac){
++    memset(buffer, 0, PGSIZE/frac);
++    read_count += readFromSwapFile(curproc, buffer, file_offset*PGSIZE + (idx*(PGSIZE/frac)), PGSIZE/frac);
++    memmove(new_mem + (idx*(PGSIZE/frac)), buffer, PGSIZE/frac);
++    idx += 1;
++  }
++  // if count not okay
++  if (read_count != PGSIZE) {
++    panic("Something wrong with reading from page file");
++  }
++  
++  
++  // update metadata
++  push_file_offsets(curproc, file_offset); // push file offset  as free space
++  enqueue_page(curproc, &curproc->all_pages[demand_page_index]); // enqueue page
++  curproc->all_pages[demand_page_index].file_index = -1; // not in file anymore
++  curproc->no_of_mem_pages += 1; // increment no of pages in memory
++  curproc->no_of_swap_pages -= 1; // decrement no of pages in file
++
++  // NOTICE : did not update flags
++
++  print_proc_info(curproc);
++  cprintf("## FINISHED READ OP ##\n");
++}
++
++void
++write_page_to_file(struct proc* curproc)
++{
++
++  cprintf("\n## STARTING WRITE OP ##");
++  struct page_struct* temp;
++  int va_replace, temp_file_index;
++
++  // check initial conditions
++  // TODO : for some reason condition not working
++  if(curproc->no_of_swap_pages > MAX_SWAP_PAGES) panic("Maximum amount of pages written in file\n");
++  if(curproc->no_of_mem_pages == 0) panic("No pages in memory to write in file\n");
++
++  // select replacement page
++  // for FIFO its the first page added
++  temp = dequeue_page(curproc);
++  if(temp == 0) panic("Replacement page is invalid\n");
++  va_replace = temp->va;
++  temp_file_index = pop_file_offsets(curproc); // get free file space
++
++  // write op
++  cprintf("Writing page %d into swap file using file index %d\n", temp->index, temp_file_index);
++  if(writeToSwapFile(curproc, (char*) PTE_ADDR(va_replace), temp_file_index*PGSIZE, PGSIZE) == -1){
++    panic("Error when writing to swap file");
++  }
++
++  // update metadata
++  curproc->all_pages[temp->index].file_index = temp_file_index; // update file index info
++  curproc->no_of_swap_pages += 1; // increment no of pages in swap file
++  curproc->no_of_mem_pages -= 1; // decrement no of pages in memory
++
++  // update pte flags
++  // should be already allocated
++  pte_t* write_pte = walkpgdir(curproc->all_pages[temp->index].pgdir, (int*)va_replace, 0);
++  // free this memory
++  kfree((char*)P2V(PTE_ADDR(*write_pte)));
++  // set flags
++  *write_pte |= (PTE_U | PTE_W | PTE_PG);
++  *write_pte &= ~PTE_P; // not present  
++  lcr3(V2P(curproc->all_pages[temp->index].pgdir)); // refresh TLB
++
++  cprintf("After write : \n");
++  print_proc_info(curproc);
++
++  cprintf("## FINISHED WRITE OP ##\n");
++}
++
++
