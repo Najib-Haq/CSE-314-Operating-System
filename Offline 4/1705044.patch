@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index 09d790c..fa5480b 100644
+index 09d790c..8a56485 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -71,6 +71,14 @@ QEMU = $(shell if which qemu > /dev/null; \
@@ -25,15 +25,16 @@ index 09d790c..fa5480b 100644
  ASFLAGS = -m32 -gdwarf-2 -Wa,-divide
  # FreeBSD ld wants ``elf_i386_fbsd''
  LDFLAGS += -m $(shell $(LD) -V | grep elf_i386 2>/dev/null | head -n 1)
-@@ -181,6 +190,7 @@ UPROGS=\
+@@ -181,6 +190,8 @@ UPROGS=\
  	_usertests\
  	_wc\
  	_zombie\
-+	_test_page\
++	_test_swap\
++	_test_fork\
  
  fs.img: mkfs README $(UPROGS)
  	./mkfs fs.img README $(UPROGS)
-@@ -217,7 +227,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
+@@ -217,7 +228,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
  	then echo "-gdb tcp::$(GDBPORT)"; \
  	else echo "-s -p $(GDBPORT)"; fi)
  ifndef CPUS
@@ -42,12 +43,12 @@ index 09d790c..fa5480b 100644
  endif
  QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
  
-@@ -250,7 +260,7 @@ qemu-nox-gdb: fs.img xv6.img .gdbinit
+@@ -250,7 +261,7 @@ qemu-nox-gdb: fs.img xv6.img .gdbinit
  EXTRA=\
  	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
  	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
 -	printf.c umalloc.c\
-+	printf.c umalloc.c test_page.c\
++	printf.c umalloc.c test_swap.c test_fork.c\
  	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
  	.gdbinit.tmpl gdbutil\
  
@@ -1239,7 +1240,7 @@ index 0000000..54ef2b9
 + {
 +   uint off;
 diff --git a/proc.c b/proc.c
-index 806b1b1..054cfce 100644
+index 806b1b1..f913429 100644
 --- a/proc.c
 +++ b/proc.c
 @@ -6,6 +6,7 @@
@@ -1400,7 +1401,14 @@ index 806b1b1..054cfce 100644
    // Clear %eax so that fork returns 0 in the child.
    np->tf->eax = 0;
  
-@@ -234,6 +355,9 @@ exit(void)
+@@ -231,9 +352,16 @@ exit(void)
+   struct proc *p;
+   int fd;
+ 
++  cprintf("All processe details. EXITING..\n");
++  procdump();
++  // print_proc_info(curproc);
++  
    if(curproc == initproc)
      panic("init exiting");
  
@@ -1410,15 +1418,15 @@ index 806b1b1..054cfce 100644
    // Close all open files.
    for(fd = 0; fd < NOFILE; fd++){
      if(curproc->ofile[fd]){
-@@ -530,5 +654,116 @@ procdump(void)
+@@ -530,5 +658,116 @@ procdump(void)
          cprintf(" %p", pc[i]);
      }
      cprintf("\n");
 +
 +    /// see mappages and walkpgdir - https://www.youtube.com/watch?v=8V2YkO7lfvs
 +    printPTE(p->pgdir, p->sz);
-+  }
-+}
+   }
+ }
 +
 +
 +void
@@ -1473,7 +1481,7 @@ index 806b1b1..054cfce 100644
 +    else cur_proc->tail->next = 0;
 +    // cprintf("dequeue head va : %d, and index %d\n", temp->va, temp->index);
 +    return temp;
-   }
++  }
 +
 +  else if(MODE == 1){
 +    temp = get_NRU_page(cur_proc);
@@ -1504,7 +1512,7 @@ index 806b1b1..054cfce 100644
 +    }
 +  }
 +  return -1; // this means no free pages
- }
++}
 +
 +
 +// struct file_offsets functions
@@ -1588,6 +1596,38 @@ index 1647114..b5cd706 100644
  };
  
  // Process memory is laid out contiguously, low addresses first:
+diff --git a/syscall.c b/syscall.c
+index ee85261..916f66e 100644
+--- a/syscall.c
++++ b/syscall.c
+@@ -103,6 +103,8 @@ extern int sys_unlink(void);
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++// custom
++extern int sys_procdetails(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +128,7 @@ static int (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_procdetails] sys_procdetails,
+ };
+ 
+ void
+diff --git a/syscall.h b/syscall.h
+index bc5f356..fb99db9 100644
+--- a/syscall.h
++++ b/syscall.h
+@@ -20,3 +20,6 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++
++// custom
++#define SYS_procdetails 22
 diff --git a/sysfile.c b/sysfile.c
 index bfe61b7..bf3848e 100644
 --- a/sysfile.c
@@ -2060,483 +2100,147 @@ index 0000000..bfe61b7
 +  fd[1] = fd1;
 +  return 0;
 +}
-diff --git a/temp.txt b/temp.txt
-new file mode 100644
-index 0000000..b1ef7ce
---- /dev/null
-+++ b/temp.txt
-@@ -0,0 +1,375 @@
-+############################ allocuvm start
-+allocating : Current proc id : 1, pgdir 0, oldsz 0, newsz 2864
-+Allocated for page index 0, va 0, pgdir 234328071
-+############################ allocuvm end
+diff --git a/sysproc.c b/sysproc.c
+index 0686d29..fd81500 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -89,3 +89,12 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
 +
-+############################ allocuvm start
-+allocating : Current proc id : 1, pgdir 234328071, oldsz 4096, newsz 12288
-+Allocated for page index 1, va 4096, pgdir 234328071
-+Allocated for page index 2, va 8192, pgdir 234328071
-+############################ allocuvm end
-+switched pgdir from 234602535 to 234328071
-+free vm for page dir = 234602535
-+
-+############################ deallocuvm start
-+DEALLOCATING : Current proc id : 1, proc pgdir 234328071, pgdir 234602535, oldsz -2147483648, newsz 0
-+############################ deallocuvm end
-+0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
-+(idx: 0, pgdir: 234328071, va: 0) -> (idx: 1, pgdir: 234328071, va: 4096) -> (idx: 2, pgdir: 234328071, va: 8192) -> 
-+
-+
-+curproc swap files: 0, mem files 3
-+Freevm done.
-+
-+init: starting sh
-+In fork, parent id 1 and child id 2
-+In exec : , proc id is 2 and sz is 12288
-+
-+############################ allocuvm start
-+allocating : Current proc id : 2, pgdir 0, oldsz 0, newsz 6576
-+Allocated for page index 0, va 0, pgdir 234033159
-+Allocated for page index 1, va 4096, pgdir 234033159
-+############################ allocuvm end
-+
-+############################ allocuvm start
-+allocating : Current proc id : 2, pgdir 234033159, oldsz 8192, newsz 16384
-+Allocated for page index 2, va 8192, pgdir 234033159
-+Allocated for page index 3, va 12288, pgdir 234033159
-+############################ allocuvm end
-+switched pgdir from 234315815 to 234033159
-+free vm for page dir = 234315815
-+
-+############################ deallocuvm start
-+DEALLOCATING : Current proc id : 2, proc pgdir 234033159, pgdir 234315815, oldsz -2147483648, newsz 0
-+############################ deallocuvm end
-+0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
-+(idx: 0, pgdir: 234033159, va: 0) -> (idx: 1, pgdir: 234033159, va: 4096) -> (idx: 2, pgdir: 234033159, va: 8192) -> 
-+(idx: 3, pgdir: 234033159, va: 12288) -> 
-+
-+curproc swap files: 0, mem files 4
-+Freevm done.
-+
-+$ test_page
-+In fork, parent id 2 and child id 3
-+
-+############################ allocuvm start
-+allocating : Current proc id : 3, pgdir 234311719, oldsz 16384, newsz 49152
-+Allocated for page index 0, va 16384, pgdir 234311719
-+Allocated for page index 1, va 20480, pgdir 234311719
-+Allocated for page index 2, va 24576, pgdir 234311719
-+Allocated for page index 3, va 28672, pgdir 234311719
-+Allocated for page index 4, va 32768, pgdir 234311719
-+Allocated for page index 5, va 36864, pgdir 234311719
-+Allocated for page index 6, va 40960, pgdir 234311719
-+Allocated for page index 7, va 45056, pgdir 234311719
-+############################ allocuvm end
-+In exec : , proc id is 3 and sz is 49152
-+
-+############################ allocuvm start
-+allocating : Current proc id : 3, pgdir 0, oldsz 0, newsz 3412
-+Allocated for page index 8, va 0, pgdir 233705479
-+############################ allocuvm end
-+
-+############################ allocuvm start
-+allocating : Current proc id : 3, pgdir 233705479, oldsz 4096, newsz 12288
-+Allocated for page index 9, va 4096, pgdir 233705479
-+Allocated for page index 10, va 8192, pgdir 233705479
-+############################ allocuvm end
-+switched pgdir from 234311719 to 233705479
-+free vm for page dir = 234311719
-+
-+############################ deallocuvm start
-+DEALLOCATING : Current proc id : 3, proc pgdir 233705479, pgdir 234311719, oldsz -2147483648, newsz 0
-+Removing page index 0
-+after deletion -> (idx: 1, pgdir: 234311719, va: 20480) -> (idx: 2, pgdir: 234311719, va: 24576) -> (idx: 3, pgdir: 23431 
-+(idx: 4, pgdir: 234311719, va: 32768) -> (idx: 5, pgdir: 234311719, va: 36864) -> (idx: 6, pgdir: 234311719, va: 40960) - 
-+(idx: 7, pgdir: 234311719, va: 45056) -> (idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479, va: 4096) -> 
-+(idx: 10, pgdir: 233705479, va: 8192) -> 
-+Removing page index 1
-+after deletion -> (idx: 2, pgdir: 234311719, va: 24576) -> (idx: 3, pgdir: 234311719, va: 28672) -> (idx: 4, pgdir: 23431 
-+(idx: 5, pgdir: 234311719, va: 36864) -> (idx: 6, pgdir: 234311719, va: 40960) -> (idx: 7, pgdir: 234311719, va: 45056) - 
-+(idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479, va: 4096) -> (idx: 10, pgdir: 233705479, va: 8192) -> 
-+
-+Removing page index 2
-+after deletion -> (idx: 3, pgdir: 234311719, va: 28672) -> (idx: 4, pgdir: 234311719, va: 32768) -> (idx: 5, pgdir: 23431 
-+(idx: 6, pgdir: 234311719, va: 40960) -> (idx: 7, pgdir: 234311719, va: 45056) -> (idx: 8, pgdir: 233705479, va: 0) -> 
-+(idx: 9, pgdir: 233705479, va: 4096) -> (idx: 10, pgdir: 233705479, va: 8192) -> 
-+Removing page index 3
-+after deletion -> (idx: 4, pgdir: 234311719, va: 32768) -> (idx: 5, pgdir: 234311719, va: 36864) -> (idx: 6, pgdir: 23431 
-+(idx: 7, pgdir: 234311719, va: 45056) -> (idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479, va: 4096) -> 
-+(idx: 10, pgdir: 233705479, va: 8192) -> 
-+Removing page index 4
-+after deletion -> (idx: 5, pgdir: 234311719, va: 36864) -> (idx: 6, pgdir: 234311719, va: 40960) -> (idx: 7, pgdir: 23431 
-+(idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479, va: 4096) -> (idx: 10, pgdir: 233705479, va: 8192) -> 
-+
-+Removing page index 5
-+after deletion -> (idx: 6, pgdir: 234311719, va: 40960) -> (idx: 7, pgdir: 234311719, va: 45056) -> (idx: 8, pgdir: 23370 
-+(idx: 9, pgdir: 233705479, va: 4096) -> (idx: 10, pgdir: 233705479, va: 8192) -> 
-+Removing page index 6
-+after deletion -> (idx: 7, pgdir: 234311719, va: 45056) -> (idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479 
-+(idx: 10, pgdir: 233705479, va: 8192) -> 
-+Removing page index 7
-+after deletion -> (idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479, va: 4096) -> (idx: 10, pgdir: 233705479 
-+
-+############################ deallocuvm end
-+0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
-+(idx: 8, pgdir: 233705479, va: 0) -> (idx: 9, pgdir: 233705479, va: 4096) -> (idx: 10, pgdir: 233705479, va: 8192) -> 
-+
-+
-+curproc swap files: 0, mem files 3
-+Freevm done.
-+
-+
-+############################ allocuvm start
-+allocating : Current proc id : 3, pgdir 233705511, oldsz 12288, newsz 81928
-+Allocated for page index 0, va 12288, pgdir 233705511
-+Allocated for page index 1, va 16384, pgdir 233705511
-+Allocated for page index 2, va 20480, pgdir 233705511
-+Allocated for page index 3, va 24576, pgdir 233705511
-+Allocated for page index 4, va 28672, pgdir 233705511
-+Allocated for page index 5, va 32768, pgdir 233705511
-+Allocated for page index 6, va 36864, pgdir 233705511
-+Allocated for page index 7, va 40960, pgdir 233705511
-+Allocated for page index 11, va 45056, pgdir 233705511
-+Allocated for page index 12, va 49152, pgdir 233705511
-+Allocated for page index 13, va 53248, pgdir 233705511
-+Allocated for page index 14, va 57344, pgdir 233705511
-+
-+## STARTING WRITE OP ##
-+searching for index 8
-+searching for index 9
-+Class 1: page index 9
-+from NRU : page index 9, va 4096, pgdir 233705511
-+Writing page 9 into swap file using file index 0 and va 4096 and pgdir 233705511
-+WRITE DONE
-+After write : 
-+PROC STATE ---------------------------------------------------
-+Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 14, SWAP_PAGES: 1, PAGE_FAULTS: 0
-+Pages in memory : 
-+(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 0, pgdir: 233705511, va: 12288) -> 
-+(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
-+(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
-+(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
-+(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> 
-+Pages in file : 
-+(idx: 9, pgdir: 233705511, va: 4096) -> 
-+Free file index : 
-+1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
-+---------------------------------------------------------------
-+## FINISHED WRITE OP ##
-+Allocated for page index 15, va 61440, pgdir 233705511
-+
-+## STARTING WRITE OP ##
-+searching for index 8
-+searching for index 10
-+searching for index 0
-+Class 1: page index 0
-+from NRU : page index 0, va 12288, pgdir 233705511
-+Writing page 0 into swap file using file index 1 and va 12288 and pgdir 233705511
-+WRITE DONE
-+After write : 
-+PROC STATE ---------------------------------------------------
-+Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 14, SWAP_PAGES: 2, PAGE_FAULTS: 0
-+Pages in memory : 
-+(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 1, pgdir: 233705511, va: 16384) -> 
-+(idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) - 
-+(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
-+(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
-+(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> 
-+Pages in file : 
-+(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
-+Free file index : 
-+2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
-+---------------------------------------------------------------
-+## FINISHED WRITE OP ##
-+Allocated for page index 16, va 65536, pgdir 233705511
-+
-+## STARTING WRITE OP ##
-+searching for index 8
-+searching for index 10
-+searching for index 1
-+Class 1: page index 1
-+from NRU : page index 1, va 16384, pgdir 233705511
-+Writing page 1 into swap file using file index 2 and va 16384 and pgdir 233705511
-+WRITE DONE
-+After write : 
-+PROC STATE ---------------------------------------------------
-+Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 14, SWAP_PAGES: 3, PAGE_FAULTS: 0
-+Pages in memory : 
-+(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 2, pgdir: 233705511, va: 20480) -> 
-+(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) - 
-+(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
-+(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
-+(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> 
-+Pages in file : 
-+(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
-+
-+Free file index : 
-+3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
-+---------------------------------------------------------------
-+## FINISHED WRITE OP ##
-+Allocated for page index 17, va 69632, pgdir 233705511
-+
-+## STARTING WRITE OP ##
-+searching for index 8
-+searching for index 10
-+searching for index 2
-+Class 1: page index 2
-+from NRU : page index 2, va 20480, pgdir 233705511
-+Writing page 2 into swap file using file index 3 and va 20480 and pgdir 233705511
-+WRITE DONE
-+After write : 
-+PROC STATE ---------------------------------------------------
-+Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 14, SWAP_PAGES: 4, PAGE_FAULTS: 0
-+Pages in memory : 
-+(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 3, pgdir: 233705511, va: 24576) -> 
-+(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) - 
-+(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
-+(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
-+(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> 
-+Pages in file : 
-+(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
-+(idx: 9, pgdir: 233705511, va: 4096) -> 
-+Free file index : 
-+4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
-+---------------------------------------------------------------
-+## FINISHED WRITE OP ##
-+Allocated for page index 18, va 73728, pgdir 233705511
-+
-+## STARTING WRITE OP ##
-+searching for index 8
-+searching for index 10
-+searching for index 3
-+Class 1: page index 3
-+from NRU : page index 3, va 24576, pgdir 233705511
-+Writing page 3 into swap file using file index 4 and va 24576 and pgdir 233705511
-+WRITE DONE
-+After write : 
-+PROC STATE ---------------------------------------------------
-+Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 14, SWAP_PAGES: 5, PAGE_FAULTS: 0
-+Pages in memory : 
-+(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 4, pgdir: 233705511, va: 28672) -> 
-+(idx: 5, pgdir: 233705511, va: 32768) -> (idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) - 
-+(idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248 
-+(idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536 
-+(idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728) -> 
-+Pages in file : 
-+(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
-+(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
-+Free file index : 
-+5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
-+---------------------------------------------------------------
-+## FINISHED WRITE OP ##
-+Allocated for page index 19, va 77824, pgdir 233705511
-+
-+## STARTING WRITE OP ##
-+searching for index 8
-+searching for index 10
-+searching for index 4
-+Class 1: page index 4
-+from NRU : page index 4, va 28672, pgdir 233705511
-+Writing page 4 into swap file using file index 5 and va 28672 and pgdir 233705511
-+WRITE DONE
-+After write : 
-+PROC STATE ---------------------------------------------------
-+Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 14, SWAP_PAGES: 6, PAGE_FAULTS: 0
-+Pages in memory : 
-+(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 5, pgdir: 233705511, va: 32768) -> 
-+(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
-+(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
-+(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632 
-+(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> 
-+Pages in file : 
-+(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
-+(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
-+
-+Free file index : 
-+6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
-+---------------------------------------------------------------
-+## FINISHED WRITE OP ##
-+Allocated for page index 20, va 81920, pgdir 233705511
-+############################ allocuvm end
-+In trap : va: 12292, pgdir: 233705511, pid: 3, user: 3
-+
-+############################ trap swap inout start
-+New va : 12288
-+PROC STATE ---------------------------------------------------
-+Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6, PAGE_FAULTS: 1
-+Pages in memory : 
-+(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 5, pgdir: 233705511, va: 32768) -> 
-+(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
-+(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
-+(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632 
-+(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
-+
-+Pages in file : 
-+(idx: 0, pgdir: 233705511, va: 12288) -> (idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) - 
-+(idx: 3, pgdir: 233705511, va: 24576) -> (idx: 4, pgdir: 233705511, va: 28672) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
-+
-+Free file index : 
-+6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
-+---------------------------------------------------------------
-+IN TRAP
-+memory location at page index : 0 and file offset 1
-+
-+## STARTING READ OP ##PROC STATE ---------------------------------------------------
-+Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 16, SWAP_PAGES: 5, PAGE_FAULTS: 1
-+Pages in memory : 
-+(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 5, pgdir: 233705511, va: 32768) -> 
-+(idx: 6, pgdir: 233705511, va: 36864) -> (idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056)  
-+(idx: 12, pgdir: 233705511, va: 49152) -> (idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344 
-+(idx: 15, pgdir: 233705511, va: 61440) -> (idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632 
-+(idx: 18, pgdir: 233705511, va: 73728) -> (idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920 
-+(idx: 0, pgdir: 233705511, va: 12288) -> 
-+Pages in file : 
-+(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
-+(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
-+Free file index : 
-+1 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
-+---------------------------------------------------------------
-+## FINISHED READ OP ##
-+
-+## STARTING WRITE OP ##
-+searching for index 8
-+searching for index 10
-+searching for index 5
-+Class 1: page index 5
-+from NRU : page index 5, va 32768, pgdir 233705511
-+Writing page 5 into swap file using file index 1 and va 32768 and pgdir 233705511
-+WRITE DONE
-+After write : 
-+PROC STATE ---------------------------------------------------
-+Proc ID: 3, PGDIR: 233705511, MEM_PAGES: 15, SWAP_PAGES: 6, PAGE_FAULTS: 1
-+Pages in memory : 
-+(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 6, pgdir: 233705511, va: 36864) -> 
-+(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
-+(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
-+(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728 
-+(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> (idx: 0, pgdir: 233705511, va: 12288) 
-+
-+Pages in file : 
-+(idx: 1, pgdir: 233705511, va: 16384) -> (idx: 2, pgdir: 233705511, va: 20480) -> (idx: 3, pgdir: 233705511, va: 24576) - 
-+(idx: 4, pgdir: 233705511, va: 28672) -> (idx: 5, pgdir: 233705511, va: 32768) -> (idx: 9, pgdir: 233705511, va: 4096) -> 
-+
-+Free file index : 
-+6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
-+---------------------------------------------------------------
-+## FINISHED WRITE OP ##
-+############################ trap swap inout end
-+In trap : va: 16384, pgdir: 233689127, pid: 4, user: 3
-+
-+############################ trap swap inout start
-+New va : 16384
-+PROC STATE ---------------------------------------------------
-+Proc ID: 4, PGDIR: 233689127, MEM_PAGES: 15, SWAP_PAGES: 6, PAGE_FAULTS: 1
-+Pages in memory : 
-+(idx: 8, pgdir: 233705511, va: 0) -> (idx: 10, pgdir: 233705511, va: 8192) -> (idx: 6, pgdir: 233705511, va: 36864) -> 
-+(idx: 7, pgdir: 233705511, va: 40960) -> (idx: 11, pgdir: 233705511, va: 45056) -> (idx: 12, pgdir: 233705511, va: 49152) 
-+(idx: 13, pgdir: 233705511, va: 53248) -> (idx: 14, pgdir: 233705511, va: 57344) -> (idx: 15, pgdir: 233705511, va: 61440 
-+(idx: 16, pgdir: 233705511, va: 65536) -> (idx: 17, pgdir: 233705511, va: 69632) -> (idx: 18, pgdir: 233705511, va: 73728 
-+(idx: 19, pgdir: 233705511, va: 77824) -> (idx: 20, pgdir: 233705511, va: 81920) -> (idx: 0, pgdir: 233705511, va: 12288) 
-+
-+Pages in file : 
-+
-+Free file index : 
-+6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12 -> 13 -> 14 -> 
++// CUSTOM
++// get current process details
++int
++sys_procdetails(void)
++{
++  print_proc_info(myproc());
++  return 1;
++}
 \ No newline at end of file
-diff --git a/test_page.c b/test_page.c
+diff --git a/test_fork.c b/test_fork.c
 new file mode 100644
-index 0000000..aa2e7c4
+index 0000000..0d0c101
 --- /dev/null
-+++ b/test_page.c
-@@ -0,0 +1,86 @@
++++ b/test_fork.c
+@@ -0,0 +1,54 @@
 +#include "types.h"
 +#include "stat.h"
 +#include "user.h"
 +
-+
-+void dummy()
++void test_fork()
 +{
-+
-+    // todo : make malloc before fork
-+    int sz = 4096*17;
-+    int k;
-+    int pid = fork();
-+    int* mem = (int*) malloc(sz);
++    int no_of_int = (4096*17)/4; // as integer so required memory is 4 bytes
 +    // int pid = fork();
++    int constant;
++    int missed_count = 0;
++    int* arr = malloc(no_of_int*sizeof(int));;
++    int pid = fork();
 +
 +
 +    if(pid == 0){
-+        k = 17;
++        sleep(10);
++        constant = 17;
++        printf(1, ">>Initial CHILD Process Details:\n");
 +    }
 +    else{
-+        k = 13;
++        constant = 13;
++        printf(1, ">>Initial PARENT Process Details:\n");
++    }
++    procdetails();
++
++
++    for(int i=0; i<no_of_int; i++){
++        arr[i] = constant*i;
++    }
++    for(int i=0; i<no_of_int; i++){
++        if(arr[i] != constant*i) missed_count += 1;
 +    }
 +
-+    for(int i=0; i<sz/4; i++){
-+        mem[i] = k*i;
++    sleep(60);
++    if(pid == 0){
++        printf(1, ">>After Calculations. CHILD Process Details:\n");
 +    }
-+    sleep(250);
-+
-+    int ok=1;
-+    for(int i=0; i<sz/4; i++){
-+        if(mem[i] != k*i) ok=0;
++    if(pid == 1){
++        printf(1, ">>After Calculations. PARENT Process Details:\n");
 +    }
-+    sleep(250);
++    
++    procdetails();
++    printf(1, "Missed count : %d\n", missed_count);
 +
-+    printf(2, "######################################################## RESULT \n");
-+    if(!ok) printf(2, "failed\n");
-+    else printf(2, "success\n");
-+
-+    free((void*)mem);
++    free((void*)arr);
 +    if(pid != 0) wait();
-+    printf(2, "######################################################## RESULT \n");
-+
 +}
-+
-+
-+void dummy_easy()
-+{
-+
-+    // todo : make malloc before fork
-+    int *a;
-+    int n = 20000;
-+
-+    a = malloc(n*sizeof(int));
-+
-+    printf(2, "#####################\n################\n################### ALLOCATION DONE1 \n");
-+
-+    for(int i=0; i<n; i++){
-+        a[i] = i;
-+    }
-+
-+    printf(2, "#####################\n################\n################### ALLOCATION DONE2\n");
-+
-+    int count=0;
-+    for(int i=0; i<n; i++){
-+        if(a[i] != i) count+=1;
-+    }
-+
-+
-+
-+    printf(2, "######################################################## RESULT \n");
-+    printf(2, "Number of misses = %d\n", count);
-+
-+    free((void*)a);
-+    printf(2, "######################################################## RESULT END\n");
-+
-+
-+}
-+
 +
 +int
 +main(int argc, char *argv[])
 +{
-+    dummy_easy();
-+    // dummy();
++    test_fork();
++    exit();
++}
+\ No newline at end of file
+diff --git a/test_swap.c b/test_swap.c
+new file mode 100644
+index 0000000..a0e25f7
+--- /dev/null
++++ b/test_swap.c
+@@ -0,0 +1,53 @@
++#include "types.h"
++#include "stat.h"
++#include "user.h"
++
++void test_swap()
++{
++    int PGSIZE = 4096;
++    int MAX_PHYS = 15;
++    // int MAX_TOTAL = 30;
++    // test fifo / nru enqueue dequeue
++    printf(1, ">>Initial Process Details:\n");
++    procdetails();
++    // should already have 3 pages
++
++    char* pages[MAX_PHYS - 3]; // char array as 1 byte
++    // push to limit
++    int i;
++    for(i=0; i<(MAX_PHYS-3); i++)
++    {  
++        pages[i] = sbrk(PGSIZE);
++    }
++    pages[0][0] = 'N'; // setting a value for later check
++    pages[1][0] = 'Z'; 
++    printf(1, ">>After adding pages upto memory limit: Process Details:\n");
++    procdetails();
++    
++    // now push to swap file
++    sbrk(4*PGSIZE); // this should get the 4th page to memory which has pages[0][0]
++    printf(1, ">>After adding 4 pages to swap file: Process Details:\n");
++    procdetails();
++
++    // now retrieve a value
++    if(pages[0][0] == 'N') printf(1, ">>Successfully retrieved a value (Page fault in FIFO))\n");
++    else printf(1, ">>Not successful retrieval\n");
++    procdetails();
++
++    // now shrink memory
++    sbrk(-2*PGSIZE);
++    printf(1, ">>After shrinking 2 pages from memory: Process Details:\n");
++    procdetails();
++
++    // now retrieve a value
++    if(pages[1][0] == 'Z') printf(1, ">>Successfully retrieved a value (Page fault in FIFO))\n");
++    else printf(1, ">>Not successful retrieval\n");
++    procdetails();
++}
++
++int
++main(int argc, char *argv[])
++{
++    test_swap();
 +    exit();
 +}
 \ No newline at end of file
 diff --git a/trap.c b/trap.c
-index 41c66eb..b1602bb 100644
+index 41c66eb..9d29943 100644
 --- a/trap.c
 +++ b/trap.c
 @@ -36,6 +36,10 @@ idtinit(void)
@@ -2545,18 +2249,20 @@ index 41c66eb..b1602bb 100644
  {
 +
 +  uint page_fault_va;
-+  struct proc* curproc;
++  struct proc* curproc = myproc();
 +
    if(tf->trapno == T_SYSCALL){
      if(myproc()->killed)
        exit();
-@@ -50,11 +54,13 @@ trap(struct trapframe *tf)
+@@ -46,6 +50,7 @@ trap(struct trapframe *tf)
+     return;
+   }
+ 
++  if((curproc != 0) && curproc->pid > 2) clearAccessBitForAll();
+   switch(tf->trapno){
    case T_IRQ0 + IRQ_TIMER:
      if(cpuid() == 0){
-       acquire(&tickslock);
-+      // if(myproc() != 0) clearAccessBitForAll();
-       ticks++;
-       wakeup(&ticks);
+@@ -55,6 +60,7 @@ trap(struct trapframe *tf)
        release(&tickslock);
      }
      lapiceoi();
@@ -2564,14 +2270,13 @@ index 41c66eb..b1602bb 100644
      break;
    case T_IRQ0 + IRQ_IDE:
      ideintr();
-@@ -78,6 +84,21 @@ trap(struct trapframe *tf)
+@@ -78,6 +84,20 @@ trap(struct trapframe *tf)
      lapiceoi();
      break;
  
 +  // case page fault
 +  case T_PGFLT:
 +    page_fault_va = rcr2();
-+    curproc = myproc();
 +    curproc->no_of_page_faults += 1;
 +    // #if PRINT
 +    // cprintf("In trap : va: %d, pgdir: %d, pid: %d, user: %d\n", page_fault_va, *curproc->pgdir, curproc->pid, tf->cs&3);
@@ -2586,22 +2291,45 @@ index 41c66eb..b1602bb 100644
    //PAGEBREAK: 13
    default:
      if(myproc() == 0 || (tf->cs&3) == 0){
-@@ -103,8 +124,12 @@ trap(struct trapframe *tf)
+@@ -103,8 +123,12 @@ trap(struct trapframe *tf)
    // Force process to give up CPU on clock tick.
    // If interrupts were on while locks held, would need to check nlock.
    if(myproc() && myproc()->state == RUNNING &&
 -     tf->trapno == T_IRQ0+IRQ_TIMER)
 +     tf->trapno == T_IRQ0+IRQ_TIMER){
 +    
-+    if(myproc()!=0) clearAccessBitForAll(); //clearAccessBit(myproc()->pgdir, myproc()->sz);
++    // if(myproc()!=0) clearAccessBitForAll(); //clearAccessBit(myproc()->pgdir, myproc()->sz);
 +
      yield();
 +  }
  
    // Check if the process has been killed since we yielded
    if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
+diff --git a/user.h b/user.h
+index 4f99c52..cde687a 100644
+--- a/user.h
++++ b/user.h
+@@ -23,6 +23,8 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++// custom
++int procdetails(void);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/usys.S b/usys.S
+index 8bfd8a1..c4e7cc4 100644
+--- a/usys.S
++++ b/usys.S
+@@ -29,3 +29,4 @@ SYSCALL(getpid)
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(procdetails)
+\ No newline at end of file
 diff --git a/vm.c b/vm.c
-index 7134cff..0ebb243 100644
+index 7134cff..0496408 100644
 --- a/vm.c
 +++ b/vm.c
 @@ -6,6 +6,7 @@
@@ -2731,7 +2459,7 @@ index 7134cff..0ebb243 100644
      mem = kalloc();
      if(mem == 0){
        cprintf("allocuvm out of memory\n");
-@@ -244,7 +320,37 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
+@@ -244,7 +320,38 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
        kfree(mem);
        return 0;
      }
@@ -2764,12 +2492,13 @@ index 7134cff..0ebb243 100644
 +  
 +
 +  #if PRINT 
++    print_proc_info(curproc);
 +    cprintf("############################ allocuvm end\n");
 +  #endif
    return newsz;
  }
  
-@@ -257,24 +363,103 @@ deallocuvm(pde_t *pgdir, uint oldsz, uint newsz)
+@@ -257,24 +364,103 @@ deallocuvm(pde_t *pgdir, uint oldsz, uint newsz)
  {
    pte_t *pte;
    uint a, pa;
@@ -2873,7 +2602,7 @@ index 7134cff..0ebb243 100644
    return newsz;
  }
  
-@@ -284,7 +469,10 @@ void
+@@ -284,7 +470,10 @@ void
  freevm(pde_t *pgdir)
  {
    uint i;
@@ -2885,7 +2614,7 @@ index 7134cff..0ebb243 100644
    if(pgdir == 0)
      panic("freevm: no pgdir");
    deallocuvm(pgdir, KERNBASE, 0);
-@@ -295,6 +483,7 @@ freevm(pde_t *pgdir)
+@@ -295,6 +484,7 @@ freevm(pde_t *pgdir)
      }
    }
    kfree((char*)pgdir);
@@ -2893,7 +2622,7 @@ index 7134cff..0ebb243 100644
  }
  
  // Clear PTE_U on a page. Used to create an inaccessible
-@@ -316,7 +505,7 @@ pde_t*
+@@ -316,7 +506,7 @@ pde_t*
  copyuvm(pde_t *pgdir, uint sz)
  {
    pde_t *d;
@@ -2902,7 +2631,7 @@ index 7134cff..0ebb243 100644
    uint pa, i, flags;
    char *mem;
  
-@@ -325,8 +514,19 @@ copyuvm(pde_t *pgdir, uint sz)
+@@ -325,8 +515,19 @@ copyuvm(pde_t *pgdir, uint sz)
    for(i = 0; i < sz; i += PGSIZE){
      if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
        panic("copyuvm: pte should exist");
@@ -2922,7 +2651,7 @@ index 7134cff..0ebb243 100644
      pa = PTE_ADDR(*pte);
      flags = PTE_FLAGS(*pte);
      if((mem = kalloc()) == 0)
-@@ -392,3 +592,308 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
+@@ -392,3 +593,307 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
  //PAGEBREAK!
  // Blank page.
  
@@ -3042,18 +2771,18 @@ index 7134cff..0ebb243 100644
 +void
 +print_proc_info(struct proc* curproc)
 +{
-+  #if PRINT
-+    cprintf("PROC STATE ---------------------------------------------------\n");
-+    cprintf("Proc ID: %d, PGDIR: %d, MEM_PAGES: %d, SWAP_PAGES: %d, PAGE_FAULTS: %d\n", 
-+              curproc->pid, *curproc->pgdir, curproc->no_of_mem_pages, curproc->no_of_swap_pages, curproc->no_of_page_faults);  
-+    cprintf("Pages in memory : \n");
-+    print_fifo(curproc->tail);
-+    cprintf("Pages in file : \n");
-+    print_file(curproc);
-+    cprintf("Free file index : \n");
-+    print_file_fifo(curproc->free_file_pos);
-+    cprintf("---------------------------------------------------------------\n");
-+  #endif
++  // #if PRINT
++  cprintf("PROC STATE ---------------------------------------------------\n");
++  cprintf("Proc ID: %d, PGDIR: %d, MEM_PAGES: %d, SWAP_PAGES: %d, PAGE_FAULTS: %d\n", 
++            curproc->pid, *curproc->pgdir, curproc->no_of_mem_pages, curproc->no_of_swap_pages, curproc->no_of_page_faults);  
++  cprintf("Pages in memory : \n");
++  print_fifo(curproc->tail);
++  cprintf("Pages in file : \n");
++  print_file(curproc);
++  cprintf("Free file index : \n");
++  print_file_fifo(curproc->free_file_pos);
++  cprintf("---------------------------------------------------------------\n");
++  // #endif
 +}
 +
 +
@@ -3127,7 +2856,7 @@ index 7134cff..0ebb243 100644
 +  // for(int i=0; i<PGSIZE/2; i++) cprintf("%s ", &buffer[i]);
 +  // cprintf("\n");
 +  
-+  if(writeToSwapFile(curproc, (char*) PTE_ADDR(va_replace), temp_file_index*PGSIZE, PGSIZE) == -1){
++  if(writeToSwapFile(curproc, (char*) va_replace, temp_file_index*PGSIZE, PGSIZE) == -1){
 +    panic("Error when writing to swap file");
 +  }
 +  // cprintf("WRITE DONE\n");
@@ -3220,14 +2949,13 @@ index 7134cff..0ebb243 100644
 +  pte_t *pte;
 +  struct page_struct* temp=curproc->tail;
 +
++  // cprintf("clearing bits\n");
 +  while(temp != 0)
 +  {
 +    pte = walkpgdir(temp->pgdir, (char*)temp->va, 0);
++    if(pte == 0) panic("CANNOT BE PTE\n");
 +    *pte &= ~(PTE_A);
 +    temp = temp->prev;
-+    
 +  }
-+  // cprintf("clearing bits\n");
 +  
-+  // lcr3(V2P(curproc->pgdir));
 +}
