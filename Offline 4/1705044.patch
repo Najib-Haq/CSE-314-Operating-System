@@ -2329,7 +2329,7 @@ index 8bfd8a1..c4e7cc4 100644
 +SYSCALL(procdetails)
 \ No newline at end of file
 diff --git a/vm.c b/vm.c
-index 7134cff..0496408 100644
+index 7134cff..696b293 100644
 --- a/vm.c
 +++ b/vm.c
 @@ -6,6 +6,7 @@
@@ -2663,7 +2663,7 @@ index 7134cff..0496408 100644
 +
 +  // page tables
 +  cprintf("Page tables:\n");
-+  cprintf("\tmemory location of page directory = %p\n", *pgdir);
++  cprintf("\tmemory location of page directory = %p\n", pgdir);
 +
 +  int i, j, ppn;
 +  for(i = 0; i < NPDENTRIES; i += 1){
@@ -2671,13 +2671,13 @@ index 7134cff..0496408 100644
 +    if (i >= (KERNBASE >> 22)) break;  // break when kernbase values start
 +    if((*pde & PTE_U) && (*pde & PTE_P)){
 +      cprintf("\tpdir PTE %d, %d:\n", i, *pde>>12);
-+      cprintf("\t\tmemory location of page table = %d\n", PTE_ADDR(*pde));
++      cprintf("\t\tmemory location of page table = %p\n", PTE_ADDR(*pde));
 +      pgtab = (pte_t*)P2V(PTE_ADDR(*pde)); // [Address in directory entry] -> to virtual
 +      for(j = 0; j < NPTENTRIES; j += 1){
 +        pte = &pgtab[j];
 +        if((*pte & PTE_U) && (*pte & PTE_P)){
 +          ppn = *pte>>12;
-+          cprintf("\t\tptbl PTE %d, %d, %d\n", j, ppn, ppn<<12);
++          cprintf("\t\tptbl PTE %d, %d, %p\n", j, ppn, ppn<<12);
 +        }
 +      }
 +    }
